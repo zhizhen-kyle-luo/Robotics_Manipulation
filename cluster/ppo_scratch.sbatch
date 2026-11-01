@@ -3,6 +3,7 @@
 # sparse-reward sanity check. Resubmitting the same array resumes each run from its newest
 # checkpoint, so time limits only cost the iterations since the last save.
 #     sbatch --array=1-4 cluster/ppo_scratch.sbatch
+# Trains from the saved grasped training states (override with STARTS=... sbatch ...).
 #SBATCH --job-name=ppo-scratch
 #SBATCH --partition=mit_normal_gpu
 #SBATCH --gres=gpu:1
@@ -22,12 +23,14 @@ else
     REWARD=sparse
 fi
 RUN=ppo_scratch_${REWARD}_seed${SEED}
+STARTS=${STARTS:-data/train_starts.pt}
+[ -f "$STARTS" ] || { echo "missing $STARTS (Sut's training start states)"; exit 1; }
 
 if [ -f runs/"$RUN"/final_ckpt.pt ]; then
     echo "$RUN already finished"
     exit 0
 fi
-FLAGS=(--seed "$SEED" --reward-mode "$REWARD" --exp-name "$RUN" --no-capture-video)
+FLAGS=(--seed "$SEED" --reward-mode "$REWARD" --exp-name "$RUN" --no-capture-video --starts "$STARTS")
 LATEST=$(ls -v runs/"$RUN"/ckpt_*.pt 2>/dev/null | tail -n 1 || true)
 if [ -n "$LATEST" ]; then
     echo "resuming $RUN from $LATEST"
