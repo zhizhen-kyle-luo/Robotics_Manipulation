@@ -22,6 +22,7 @@ from mani_skill.utils.wrappers.record import RecordEpisode
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import noisy_env  # registers PegInsertionSideNoisy-v1
+from start_pool import StartPoolWrapper
 from residual import HoldBase, ResidualWrapper
 
 @dataclass
@@ -113,6 +114,12 @@ class Args:
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
     finite_horizon_gae: bool = False
+    starts: Optional[str] = None
+    """saved grasped start states to train from (start_states.py format); None resets into the full task"""
+    eval_starts: Optional[str] = None
+    """saved start states for the in-training evaluation; defaults to --starts"""
+    starts_reshuffle_freq: int = 25
+    """with --starts, rebuild every slot from a new batch of the pool every this many iterations"""
 
 
     # to be filled in runtime
@@ -209,6 +216,9 @@ if __name__ == "__main__":
         env_kwargs["control_mode"] = args.control_mode
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
+    if args.starts is not None:
+        envs = StartPoolWrapper(envs, args.starts, seed=args.seed)
+        eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
@@ -305,6 +315,10 @@ if __name__ == "__main__":
         print(f"Epoch: {iteration}, global_step={global_step}")
         final_values = torch.zeros((args.num_steps, args.num_envs), device=device)
         agent.eval()
+        if args.starts is not None and iteration > start_iteration and iteration % args.starts_reshuffle_freq == 0:
+            # slots keep their geometry between full resets, so periodically draw a new batch of the pool
+            next_obs, _ = envs.reset()
+            next_done = torch.zeros(args.num_envs, device=device)
         if iteration % args.eval_freq == 1:
             print("Evaluating")
             eval_obs, _ = eval_envs.reset()
