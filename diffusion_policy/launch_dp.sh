@@ -8,7 +8,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PYTHON=${PYTHON:-$(realpath ../.venv/bin/python)}
+# absolute path, but do not resolve the venv symlink (that would drop the venv)
+PYTHON=${PYTHON:-$(cd .. && pwd)/.venv/bin/python}
 DATA=${DATA:-$HOME/Robotics_Manipulation/data/dp_training}
 SEEDS=${SEEDS:-"0 1 2"}
 WANDB_PROJECT=${WANDB_PROJECT:-dp_peginsertion_full136}
