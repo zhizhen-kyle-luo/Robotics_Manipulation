@@ -94,6 +94,36 @@ RESUME=runs/dp_full1000_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
 
 All options: `../.venv/bin/python train.py --help`
 
+### One run with images: `train_rgbd.py`
+
+Same algorithm with camera images (RGB and/or depth, 128x128) plus the robot state as input. It needs demos
+replayed with image observations (`trajectory.rgb.*.h5` or `trajectory.rgbd.*.h5`); the state demos in
+`../data/dp_training` do not work. Make them from the raw ManiSkill demos with:
+
+```bash
+../.venv/bin/python -m mani_skill.trajectory.replay_trajectory --traj-path <raw demo>.h5 \
+  -c pd_ee_delta_pose -o rgb -b physx_cpu --save-traj
+```
+
+```bash
+../.venv/bin/python train_rgbd.py --env-id PegInsertionSide-v1 \
+  --demo-path <path>/trajectory.rgb.pd_ee_delta_pose.physx_cpu.h5 \
+  --control-mode pd_ee_delta_pose --sim-backend physx_cpu --obs-mode rgb \
+  --num-demos 1000 --max_episode_steps 300 --total_iters 100000 \
+  --num_eval_envs 8 --save_freq 5000 \
+  --seed 0 --exp-name dp_rgb1000_s0
+```
+
+Options are the same as `train.py`, except:
+
+| option | default | meaning |
+|---|---|---|
+| `--obs-mode` | `rgb+depth` | `rgb`, `depth` or `rgb+depth`; must match the demo file |
+| `--batch_size` | `256` | |
+| `--norm-stats-path`, `--resume` | not available | only added to `train.py` |
+
+`launch_dp.sh` only runs `train.py`. All options: `../.venv/bin/python train_rgbd.py --help`
+
 ## 3. Evaluation from grasped start states: `eval_start_states.py`
 
 ```bash
