@@ -17,6 +17,7 @@ Note: The attachment is scripted and does not demonstrate a physically
 validated grasp using the robot's fingers.
 """
 import argparse
+import time
 import mplib
 import numpy as np
 import sapien
@@ -25,6 +26,7 @@ from mani_skill.examples.motionplanning.panda.motionplanner import (
     PandaArmMotionPlanningSolver,
 )
 from mani_skill.utils.structs.pose import to_sapien_pose
+from mani_skill.utils.wrappers.record import RecordEpisode
 
 import gymnasium as gym
 import argparse
@@ -329,6 +331,14 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--record-dir", type=str, default=None,
+                        help="save demos (trajectory .h5 + .json, ManiSkill format) to this folder; off if not given")
+    parser.add_argument("--traj-name", type=str, default=None,
+                        help="trajectory file name (default: current date and time)")
+    parser.add_argument("--only-count-success", action="store_true",
+                        help="run until --num-episodes successful demos are saved; failed episodes are discarded")
+    parser.add_argument("--save-video", action="store_true",
+                        help="also save an mp4 per saved episode (needs --headless)")
     args = parser.parse_args()
 
     env = gym.make(
@@ -337,29 +347,59 @@ def main():
         control_mode="pd_joint_pos",
         reward_mode="dense",
         render_mode="rgb_array" if args.headless else "human",
-        max_episode_steps=300,
+        max_episode_steps=PLANNING_MAX_EPISODE_STEPS,
     )
+    if args.record_dir:
+        assert args.headless or not args.save_video, "--save-video needs --headless"
+        # same recorder setup as ManiSkill's motionplanning/panda/run.py, so the output can be
+        # converted with mani_skill.trajectory.replay_trajectory like the downloaded demos
+        env = RecordEpisode(
+            env,
+            output_dir=args.record_dir,
+            trajectory_name=args.traj_name or time.strftime("%Y%m%d_%H%M%S"),
+            save_video=args.save_video,
+            source_type="motionplanning",
+            source_desc="peg_insertion_planner.py motion planning",
+            video_fps=30,
+            save_on_reset=False,
+        )
 
     try:
         successes = 0
+        saved = 0
+        episode = 0
 
-        for episode in range(args.num_episodes):
+        while (saved if args.only_count_success else episode) < args.num_episodes:
             seed = args.seed + episode
-            result = solve_episode(
-                env,
-                seed=seed,
-                debug=args.debug,
-                vis=not args.headless,
-            )
+            try:
+                result = solve_episode(
+                    env,
+                    seed=seed,
+                    debug=args.debug,
+                    vis=not args.headless,
+                )
+            except Exception as e:  # planner errors count as failed episodes
+                result = {"success": False, "failure_reason": f"exception: {e!r}"}
             successes += int(result["success"])
+
+            if args.record_dir:
+                keep = result["success"] or not args.only_count_success
+                env.flush_trajectory(save=keep)
+                if args.save_video:
+                    env.flush_video(save=keep)
+                saved += int(keep)
 
             print(
                 f"Episode {episode}, seed={seed}: "
                 f"success={result['success']}, "
                 f"reason={result['failure_reason']}"
+                + (f", saved {saved}" if args.record_dir else "")
             )
+            episode += 1
 
-        print(f"Success rate: {successes}/{args.num_episodes}")
+        print(f"Success rate: {successes}/{episode}")
+        if args.record_dir:
+            print(f"Saved {saved} trajectories to {args.record_dir}")
 
     finally:
         env.close()
