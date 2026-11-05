@@ -57,6 +57,11 @@ class Args:
     """observed hole offset magnitude range in metres; (0, 0.004) for the noise-trained residual"""
     base: Optional[Literal["hold"]] = None
     """frozen base policy for residual RL; None trains PPO from scratch"""
+    logstd_init: Optional[float] = None
+    """initial log std of the Gaussian policy; None picks -1.0 for the residual (ResiP) and -0.5 from scratch (ManiSkill baseline)"""
+    gripper_closed: bool = False
+    """hold the gripper closed whatever the policy outputs. an untrained policy from scratch otherwise drops the peg within
+    50 steps of every episode, which the residual cannot do: its base holds the gripper closed and its correction is scaled by 0.1"""
     residual_scale: float = 0.1
     """residual action scale, from ResiP"""
     reward_mode: Optional[str] = None
@@ -75,8 +80,11 @@ class Args:
     """whether to let parallel evaluation environments reset upon termination instead of truncation"""
     num_steps: int = 16
     """the number of steps to run in each environment per policy rollout"""
-    num_eval_steps: int = 100
-    """the number of steps to run in each evaluation environment during evaluation"""
+    max_episode_steps: int = 200
+    """episode length; 200 matches the insertion-only Diffusion Policy evaluation, so every method gets the same time"""
+    num_eval_steps: Optional[int] = None
+    """the number of steps to run in each evaluation environment during evaluation; defaults to max_episode_steps,
+    because evaluation ignores terminations and only logs metrics when its episodes truncate"""
     reconfiguration_freq: Optional[int] = None
     """how often to reconfigure the environment during training"""
     eval_reconfiguration_freq: Optional[int] = 1
@@ -194,8 +202,12 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    if args.num_eval_steps is None:
+        args.num_eval_steps = args.max_episode_steps
     if args.reward_mode is None:
         args.reward_mode = "sparse" if args.base is not None else "normalized_dense"
+    if args.logstd_init is None:
+        args.logstd_init = -1.0 if args.base is not None else -0.5
     if args.exp_name is None:
         args.exp_name = os.path.basename(__file__)[: -len(".py")]
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -211,13 +223,14 @@ if __name__ == "__main__":
 
     # env setup
     env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend=args.sim_backend, reward_mode=args.reward_mode,
-                      hole_offset_range=args.hole_offset_range)
+                      hole_offset_range=args.hole_offset_range, max_episode_steps=args.max_episode_steps)
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
+    train_pool = None
     if args.starts is not None:
-        envs = StartPoolWrapper(envs, args.starts, seed=args.seed)
+        envs = train_pool = StartPoolWrapper(envs, args.starts, seed=args.seed)
         eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
@@ -270,7 +283,7 @@ if __name__ == "__main__":
         print("Running evaluation")
 
     # ResiP initial log std is -1.0; the actor's small-gain final layer already starts the residual near 0
-    agent = Agent(envs, -1.0 if args.base is not None else -0.5).to(device)
+    agent = Agent(envs, args.logstd_init).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -292,7 +305,11 @@ if __name__ == "__main__":
     print(f"####")
     action_space_low, action_space_high = torch.from_numpy(envs.single_action_space.low).to(device), torch.from_numpy(envs.single_action_space.high).to(device)
     def clip_action(action: torch.Tensor):
-        return torch.clamp(action.detach(), action_space_low, action_space_high)
+        action = torch.clamp(action.detach(), action_space_low, action_space_high)
+        if args.gripper_closed:
+            # pd_ee_delta_pose gripper: -1 closes
+            action[:, -1] = -1
+        return action
 
     start_iteration = 1
     if args.checkpoint:
@@ -315,7 +332,7 @@ if __name__ == "__main__":
         print(f"Epoch: {iteration}, global_step={global_step}")
         final_values = torch.zeros((args.num_steps, args.num_envs), device=device)
         agent.eval()
-        if args.starts is not None and iteration > start_iteration and iteration % args.starts_reshuffle_freq == 0:
+        if train_pool is not None and train_pool.needs_reshuffle and iteration > start_iteration and iteration % args.starts_reshuffle_freq == 0:
             # slots keep their geometry between full resets, so periodically draw a new batch of the pool
             next_obs, _ = envs.reset()
             next_done = torch.zeros(args.num_envs, device=device)
@@ -343,7 +360,7 @@ if __name__ == "__main__":
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             torch.save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                            iteration=iteration, global_step=global_step), model_path)
+                            iteration=iteration, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
             print(f"model saved to {model_path}")
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -514,7 +531,7 @@ if __name__ == "__main__":
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
             torch.save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                            iteration=args.num_iterations + 1, global_step=global_step), model_path)
+                            iteration=args.num_iterations + 1, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()
