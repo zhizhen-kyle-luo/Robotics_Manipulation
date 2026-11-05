@@ -9,7 +9,7 @@ if ! command -v uv >/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 uv sync
-uv pip install mplib  # shipped motion planner (Linux wheels only), for demos and start states
+bash scripts/fetch_start_states.sh
 
 # SAPIEN needs a Vulkan device even for state-only simulation. GPU nodes often ship the NVIDIA
 # driver without the Vulkan ICD file, so point the loader at the driver ourselves.
@@ -24,5 +24,5 @@ cat > "$HOME/.config/vulkan/nvidia_icd.json" <<'EOF'
 }
 EOF
 
-mkdir -p logs results data
+mkdir -p logs results runs
 echo "Done. Next: sbatch cluster/smoke.sbatch"
