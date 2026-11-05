@@ -64,6 +64,26 @@ def test_flat_obs_base_matches_dict_controller(env, starts):
     assert torch.allclose(a, b)
 
 
+def seated_obs(head_x):
+    # hole at the origin with identity rotation, peg aligned with it and its head at x = head_x
+    L = 0.1
+    pose = lambda x: torch.tensor([[x, 0, 0, 1, 0, 0, 0]], dtype=torch.float32)
+    return {"extra": dict(tcp_pose=pose(head_x - 2 * L), peg_pose=pose(head_x - L),
+                          peg_half_size=torch.tensor([[L, 0.02, 0.02]]), box_hole_pose=pose(0.0),
+                          box_hole_radius=torch.tensor([0.023]))}
+
+
+def test_classical_holds_once_seated_and_stays_seated():
+    hold = torch.tensor([[0, 0, 0, 0, 0, 0, -1]], dtype=torch.float32)
+    controller = ClassicalController(1)
+    assert torch.equal(controller.act(seated_obs(0.0)), hold)
+    # still holds if the head then sags back a little
+    assert torch.equal(controller.act(seated_obs(-0.010)), hold)
+    # a new episode starts from the beginning
+    controller.reset(np.array([True]))
+    assert not torch.equal(controller.act(seated_obs(-0.010)), hold)
+
+
 def test_classical_inserts_with_true_hole_pose():
     results = evaluate.evaluate("classical", STARTS, [0.0], num_envs=1, sim_backend="physx_cpu",
                                 max_steps=100, seed=0, limit=3)
