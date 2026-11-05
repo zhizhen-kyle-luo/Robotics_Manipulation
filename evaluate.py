@@ -98,8 +98,6 @@ def run_episodes(env, policy, starts, idx, offsets, max_steps):
         obs, _, _, _, info = env.step(action)
         success = info["success"].cpu()
         first_success[(first_success < 0) & success] = t + 1
-        if (first_success >= 0).all():
-            break
     return dict(success_once=(first_success >= 0)[:n_real].numpy(),
                 success_at_end=success[:n_real].numpy(),
                 steps_to_success=first_success[:n_real].numpy())
@@ -151,7 +149,7 @@ def main():
     ap.add_argument("--noise-mm", type=float, nargs="+", default=[0, 2, 4, 6])
     ap.add_argument("--num-envs", type=int, default=1)
     ap.add_argument("--sim-backend", default="auto")
-    ap.add_argument("--max-steps", type=int, default=100)
+    ap.add_argument("--max-steps", type=int, default=200, help="same for every method; 200 matches the Diffusion Policy evaluation")
     ap.add_argument("--seed", type=int, default=0, help="seeds the offset directions")
     ap.add_argument("--limit", type=int, default=None, help="evaluate only the first N start states")
     ap.add_argument("--policy-kwargs", default="{}", help="JSON dict passed to the policy factory")
