@@ -1,10 +1,11 @@
 """Saved start states (peg already grasped) shared by every method.
 
-File format (torch.save of a dict):
+load() returns a dict:
     seeds          LongTensor (N,)   episode seed; fixes peg size and hole offset on reconfigure
     env_states     nested dict of tensors with leading dim N, from env.get_state_dict()
-    peg_half_sizes FloatTensor (N, 3) used to check that geometry was rebuilt correctly
     meta           dict (how the states were made)
+It reads that dict as saved by save(), and the list of per-state records (seed, state_dict, ...)
+saved by generate_start_states.py.
 """
 
 import torch
@@ -24,15 +25,17 @@ def index_states(states, idx):
 
 
 def load(path):
-    return torch.load(path, weights_only=False)
+    # generate_start_states.py's records also hold numpy poses, which weights_only=True refuses
+    raw = torch.load(path, weights_only=False)
+    if isinstance(raw, list):
+        return dict(seeds=torch.tensor([r["seed"] for r in raw]),
+                    env_states=stack_states([r["state_dict"] for r in raw]),
+                    meta=dict(source="generate_start_states.py", path=str(path)))
+    return raw
 
 
-def save(path, seeds, env_states, peg_half_sizes, meta):
-    torch.save(
-        dict(seeds=torch.as_tensor(seeds), env_states=env_states,
-             peg_half_sizes=torch.as_tensor(peg_half_sizes), meta=meta),
-        path,
-    )
+def save(path, seeds, env_states, meta):
+    torch.save(dict(seeds=torch.as_tensor(seeds), env_states=env_states, meta=meta), path)
 
 
 def reset_to(env, starts, idx):
@@ -45,9 +48,10 @@ def reset_to(env, starts, idx):
         seed=starts["seeds"][idx].tolist(),
         options=dict(reconfigure=True, reset_to_env_states=dict(env_states=states)),
     )
-    got = u.peg_half_sizes.cpu()
-    want = starts["peg_half_sizes"][idx]
-    assert torch.allclose(got, want, atol=1e-6), "geometry mismatch: seeds do not reproduce the saved scene"
+    # the task puts the box center at height = peg half length, so a saved state records its geometry
+    saved_half_length = states["actors"]["box_with_hole"][:, 2]
+    assert torch.allclose(u.peg_half_sizes[:, 0], saved_half_length, atol=1e-5), (
+        "geometry mismatch: seeds do not reproduce the saved scene")
     return obs, info
 
 
