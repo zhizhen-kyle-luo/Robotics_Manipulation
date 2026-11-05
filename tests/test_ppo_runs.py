@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 import ppo_runs
@@ -34,3 +35,18 @@ def test_command_resumes_with_the_same_flags(tmp_path):
     cmd = ppo_runs.ppo_command("run", ["--seed", "2"], 75_000_000, checkpoint=tmp_path / "ckpt_51.pt")
     assert cmd[1:] == ["ppo.py", "--exp-name", "run", "--total-timesteps", "75000000", "--no-capture-video",
                        "--seed", "2", "--checkpoint", str(tmp_path / "ckpt_51.pt")]
+
+
+def test_atomic_save_keeps_the_old_checkpoint_when_a_write_fails(tmp_path, monkeypatch):
+    import ppo
+
+    path = tmp_path / "final_ckpt.pt"
+    ppo.atomic_save(dict(iteration=1), path)
+
+    def killed_mid_write(obj, f):
+        open(f, "wb").write(b"\x80\x02partial")
+        raise KeyboardInterrupt
+    monkeypatch.setattr(ppo.torch, "save", killed_mid_write)
+    with pytest.raises(KeyboardInterrupt):
+        ppo.atomic_save(dict(iteration=2), path)
+    assert torch.load(path, weights_only=True)["iteration"] == 1
