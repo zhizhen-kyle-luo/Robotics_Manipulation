@@ -55,6 +55,10 @@ Classical controller on Sut's 500 held-out states (CPU sim, 200 steps):
 | 4 mm | 0.976 [0.959, 0.986] | 0.950 | 44 |
 | 6 mm | 0.968 [0.949, 0.980] | 0.934 | 50 |
 
+## Colab
+
+`colab/ppo_colab.ipynb` runs the smoke test, the tuning runs, the 75M-step runs and the final evaluation on a Colab GPU ([open in Colab](https://colab.research.google.com/github/zhizhen-kyle-luo/Robotics_Manipulation/blob/kevin/ppo-start-states/colab/ppo_colab.ipynb)). Runs, logs and results go to Google Drive. `ppo_runs.py` resumes each run from its newest checkpoint after a disconnect and skips finished ones.
+
 ## Cluster (ORCD Engaging)
 
 ```bash
