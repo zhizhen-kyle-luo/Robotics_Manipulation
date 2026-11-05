@@ -1,3 +1,6 @@
+import os
+import sys
+
 import pytest
 import torch
 
@@ -35,6 +38,24 @@ def test_command_resumes_with_the_same_flags(tmp_path):
     cmd = ppo_runs.ppo_command("run", ["--seed", "2"], 75_000_000, checkpoint=tmp_path / "ckpt_51.pt")
     assert cmd[1:] == ["ppo.py", "--exp-name", "run", "--total-timesteps", "75000000", "--no-capture-video",
                        "--seed", "2", "--checkpoint", str(tmp_path / "ckpt_51.pt")]
+
+
+def test_interrupt_stops_the_ppo_process(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    pid_file = tmp_path / "pid"
+    child = f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); print('Traceback', flush=True); time.sleep(60)"
+    monkeypatch.setattr(ppo_runs, "ppo_command", lambda *a: [sys.executable, "-c", child])
+
+    def interrupt_on_output(*args, **kwargs):
+        if "Traceback" in str(args[0]):
+            raise KeyboardInterrupt
+    monkeypatch.setattr(ppo_runs, "print", interrupt_on_output, raising=False)
+
+    with pytest.raises(KeyboardInterrupt):
+        ppo_runs.run_ppo("run", [], 1)
+    # a rerun after a notebook interrupt would otherwise race the orphan for the gpu and checkpoints
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
 
 
 def test_atomic_save_keeps_the_old_checkpoint_when_a_write_fails(tmp_path, monkeypatch):

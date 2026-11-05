@@ -78,16 +78,22 @@ def run_ppo(name, flags, total_timesteps, log_dir="logs", sps_every=50, batch_si
     epochs = 0
     with open(log_path, "a") as log:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in proc.stdout:
-            log.write(line)
-            if line.startswith("Epoch:"):
-                epochs += 1
-                last_epoch = line.strip()
-            if line.startswith("SPS:") and epochs % sps_every == 0:
-                print(f"  {last_epoch}  {line.strip()}", flush=True)
-            elif line.startswith(SHOW):
-                print("  " + line.strip(), flush=True)
-        code = proc.wait()
+        try:
+            for line in proc.stdout:
+                log.write(line)
+                if line.startswith("Epoch:"):
+                    epochs += 1
+                    last_epoch = line.strip()
+                if line.startswith("SPS:") and epochs % sps_every == 0:
+                    print(f"  {last_epoch}  {line.strip()}", flush=True)
+                elif line.startswith(SHOW):
+                    print("  " + line.strip(), flush=True)
+            code = proc.wait()
+        finally:
+            # a notebook interrupt reaches only the kernel; without this ppo.py keeps running and a rerun races it
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait()
     if code != 0:
         tail = log_path.read_text().splitlines()[-30:]
         raise RuntimeError(f"{name} exited with {code}; last lines of {log_path}:\n" + "\n".join(tail))
