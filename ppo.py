@@ -186,6 +186,13 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
+def atomic_save(obj, path):
+    """Save so that a kill mid-write leaves the previous file intact; resume trusts the newest checkpoint"""
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+
 class Logger:
     def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
         self.writer = tensorboard
@@ -362,8 +369,8 @@ if __name__ == "__main__":
                 break
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
-            torch.save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                            iteration=iteration, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
+            atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
+                             iteration=iteration, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
             print(f"model saved to {model_path}")
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -533,8 +540,8 @@ if __name__ == "__main__":
     if not args.evaluate:
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
-            torch.save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                            iteration=args.num_iterations + 1, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
+            atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
+                             iteration=args.num_iterations + 1, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()
