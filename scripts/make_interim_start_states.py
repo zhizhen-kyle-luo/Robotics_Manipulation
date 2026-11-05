@@ -66,18 +66,17 @@ def main():
 
     env = make_env(num_envs=1, sim_backend="physx_cpu", max_episode_steps=1000)
     u = env.unwrapped
-    seeds, states, sizes = [], [], []
+    seeds, states = [], []
     seed = args.first_seed
     while len(seeds) < args.n:
         if grasp(env, seed):
             seeds.append(seed)
             states.append(u.get_state_dict())
-            sizes.append(u.peg_half_sizes.cpu().clone())
         else:
             print(f"seed {seed}: grasp failed, skipped")
         seed += 1
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    start_states.save(args.out, seeds, start_states.stack_states(states), torch.cat(sizes),
+    start_states.save(args.out, seeds, start_states.stack_states(states),
                       meta=dict(source="interim servo grasp", first_seed=args.first_seed, tried=seed - args.first_seed))
     print(f"saved {len(seeds)} start states ({seed - args.first_seed} seeds tried) to {args.out}")
 
