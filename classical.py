@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
-ALIGN, INSERT, SPIRAL = 0, 1, 2
+ALIGN, INSERT, SPIRAL, SEATED = 0, 1, 2, 3
 POS_SCALE, ROT_SCALE = 0.1, 0.1
 QUARTER_ROLLS = [R.from_euler("x", k * np.pi / 2) for k in range(4)]
 
@@ -39,14 +39,14 @@ class ClassicalController:
     def __init__(self, num_envs, standoff=0.02, lead=0.015, lead_inside=0.04, x_final=0.01,
                  align_tol=0.002, align_rot_tol=0.03, align_max_steps=30, ki=0.3, bias_max=0.01,
                  stall_steps=4, stall_progress=0.001,
-                 spiral_pitch=0.004, spiral_step=0.002, spiral_rmax=0.012, spiral_press=0.005, drop_depth=0.001):
+                 spiral_pitch=0.004, spiral_step=0.002, spiral_rmax=0.012, spiral_press=0.005, drop_depth=0.001, x_seated=-0.005):
         self.n = num_envs
         self.standoff, self.lead, self.lead_inside, self.x_final = standoff, lead, lead_inside, x_final
         self.align_tol, self.align_rot_tol, self.align_max_steps = align_tol, align_rot_tol, align_max_steps
         self.ki, self.bias_max = ki, bias_max
         self.stall_steps, self.stall_progress = stall_steps, stall_progress
         self.pitch, self.ds, self.rmax, self.press = spiral_pitch, spiral_step, spiral_rmax, spiral_press
-        self.drop_depth = drop_depth
+        self.drop_depth, self.x_seated = drop_depth, x_seated
         self.reset()
 
     def reset(self, mask=None):
@@ -86,6 +86,12 @@ class ClassicalController:
         # square peg: any quarter roll about the hole axis fits, take the closest
         peg_R_des = min((hole_R * q for q in QUARTER_ROLLS),
                         key=lambda Rd: (Rd * peg_R.inv()).magnitude())
+
+        # seated: the hole offset has no component along the insertion axis, so depth is measured correctly.
+        # stop pushing and hold, since servoing on against the walls walks the arm back and pulls the peg out
+        if self.phase[i] == SEATED or head[0] >= self.x_seated:
+            self.phase[i] = SEATED
+            return np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
 
         entry = -L
         hist = self.history[i]
