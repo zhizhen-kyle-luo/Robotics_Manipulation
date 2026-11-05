@@ -316,6 +316,9 @@ if __name__ == "__main__":
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
         agent.load_state_dict(ckpt["agent"])
         if not args.evaluate:
+            # a resubmit that forgets --gripper-closed would silently hand the gripper to the policy mid-run
+            if ckpt.get("gripper_closed", False) != args.gripper_closed:
+                raise ValueError(f"--gripper-closed={args.gripper_closed} but {args.checkpoint} was trained with {ckpt.get('gripper_closed', False)}")
             # resume after a cluster time limit: continue the step count so learning curves stay aligned
             optimizer.load_state_dict(ckpt["optimizer"])
             start_iteration, global_step = ckpt["iteration"], ckpt["global_step"]
