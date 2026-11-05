@@ -1,8 +1,10 @@
 #!/bin/bash
-# PPO from scratch (3): array tasks 1-3 are the dense-reward seeds, task 4 is the one-seed
+# PPO from scratch (3), 75M steps: array tasks 1-3 are the dense-reward seeds, task 4 is the one-seed
 # sparse-reward sanity check. Resubmitting the same array resumes each run from its newest
 # checkpoint, so time limits only cost the iterations since the last save.
 #     sbatch --array=1-4 cluster/ppo_scratch.sbatch
+# PPO_FLAGS holds the settings chosen from cluster/ppo_tune.sbatch; repeat it on every resubmit:
+#     PPO_FLAGS="--logstd-init -1.5 --gripper-closed" sbatch --array=1-4 cluster/ppo_scratch.sbatch
 #SBATCH --job-name=ppo-scratch
 #SBATCH --partition=mit_normal_gpu
 #SBATCH --gres=gpu:1
@@ -22,15 +24,20 @@ else
     REWARD=sparse
 fi
 RUN=ppo_scratch_${REWARD}_seed${SEED}
+STARTS=${STARTS:-start_states/train/states.pt}
+EVAL_STARTS=${EVAL_STARTS:-start_states/eval/states.pt}
+[ -f "$STARTS" ] && [ -f "$EVAL_STARTS" ] || { echo "missing start states: run scripts/fetch_start_states.sh"; exit 1; }
 
 if [ -f runs/"$RUN"/final_ckpt.pt ]; then
     echo "$RUN already finished"
     exit 0
 fi
-FLAGS=(--seed "$SEED" --reward-mode "$REWARD" --exp-name "$RUN" --no-capture-video)
+# the learning curves are scored on all 500 held-out states: a 95% interval of about +-4 points, against +-25 on the default 16
+FLAGS=(--seed "$SEED" --reward-mode "$REWARD" --exp-name "$RUN" --no-capture-video
+       --starts "$STARTS" --eval-starts "$EVAL_STARTS" --num-eval-envs 500)
 LATEST=$(ls -v runs/"$RUN"/ckpt_*.pt 2>/dev/null | tail -n 1 || true)
 if [ -n "$LATEST" ]; then
     echo "resuming $RUN from $LATEST"
     FLAGS+=(--checkpoint "$LATEST")
 fi
-python ppo.py "${FLAGS[@]}"
+python ppo.py "${FLAGS[@]}" ${PPO_FLAGS:-}
