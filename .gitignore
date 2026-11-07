@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 data/
 start_states/
+compute_norm.py
