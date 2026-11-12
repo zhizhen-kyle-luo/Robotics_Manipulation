@@ -23,7 +23,7 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import noisy_env  # registers PegInsertionSideNoisy-v1
 from start_pool import StartPoolWrapper
-from residual import HoldBase, ResidualWrapper
+from residual import DiffusionBase, ResidualWrapper
 
 @dataclass
 class Args:
@@ -55,13 +55,15 @@ class Args:
     """physx_cuda for training, physx_cpu (num_envs 1) for local smoke tests"""
     hole_offset_range: tuple[float, float] = (0.0, 0.0)
     """observed hole offset magnitude range in metres; (0, 0.004) for the noise-trained residual"""
-    base: Optional[Literal["hold"]] = None
-    """frozen base policy for residual RL; None trains PPO from scratch"""
+    base: Optional[Literal["dp"]] = None
+    """frozen base policy for residual RL: dp is the Diffusion Policy in --base-checkpoint; None trains PPO from scratch"""
+    base_checkpoint: str = "base_ckpts/dp_seed1.pt"
+    """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
     logstd_init: Optional[float] = None
     """initial log std of the Gaussian policy; None picks -1.0 for the residual (ResiP) and -0.5 from scratch (ManiSkill baseline)"""
     gripper_closed: bool = False
     """hold the gripper closed whatever the policy outputs. an untrained policy from scratch otherwise drops the peg within
-    50 steps of every episode, which the residual cannot do: its base holds the gripper closed and its correction is scaled by 0.1"""
+    50 steps of every episode, which the residual cannot do: its base keeps the grasp and its correction is scaled by 0.1"""
     residual_scale: float = 0.1
     """residual action scale, from ResiP"""
     reward_mode: Optional[str] = None
@@ -259,9 +261,9 @@ if __name__ == "__main__":
 
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs._env)
     if args.base is not None:
-        act_dim = envs.single_action_space.shape[0]
-        envs = ResidualWrapper(envs, HoldBase(act_dim), args.residual_scale)
-        eval_envs = ResidualWrapper(eval_envs, HoldBase(act_dim), args.residual_scale)
+        # one frozen copy per vector env: each keeps its own envs' observation histories and action chunks
+        envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale)
+        eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale)
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -326,6 +328,9 @@ if __name__ == "__main__":
             # a resubmit that forgets --gripper-closed would silently hand the gripper to the policy mid-run
             if ckpt.get("gripper_closed", False) != args.gripper_closed:
                 raise ValueError(f"--gripper-closed={args.gripper_closed} but {args.checkpoint} was trained with {ckpt.get('gripper_closed', False)}")
+            # likewise a resubmit that forgets --base would continue a residual as PPO from scratch
+            if ckpt.get("base") != args.base:
+                raise ValueError(f"--base={args.base} but {args.checkpoint} was trained with {ckpt.get('base')}")
             # resume after a cluster time limit: continue the step count so learning curves stay aligned
             optimizer.load_state_dict(ckpt["optimizer"])
             start_iteration, global_step = ckpt["iteration"], ckpt["global_step"]
@@ -370,7 +375,8 @@ if __name__ == "__main__":
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=iteration, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
+                             iteration=iteration, global_step=global_step, gripper_closed=args.gripper_closed,
+                             base=args.base, base_checkpoint=args.base_checkpoint if args.base else None), model_path)
             print(f"model saved to {model_path}")
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -541,7 +547,8 @@ if __name__ == "__main__":
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=args.num_iterations + 1, global_step=global_step, gripper_closed=args.gripper_closed), model_path)
+                             iteration=args.num_iterations + 1, global_step=global_step, gripper_closed=args.gripper_closed,
+                             base=args.base, base_checkpoint=args.base_checkpoint if args.base else None), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()
