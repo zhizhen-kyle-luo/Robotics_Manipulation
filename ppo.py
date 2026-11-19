@@ -97,7 +97,7 @@ class Args:
     control_mode: Optional[str] = "pd_ee_delta_pose"
     """the control mode to use for the environment"""
     anneal_lr: bool = False
-    """Toggle learning rate annealing for policy and value networks"""
+    """Toggle learning rate annealing for policy and value networks; the residual always uses ResiP's cosine schedule"""
     gamma: Optional[float] = None
     """the discount factor gamma; None picks the method default (METHOD_DEFAULTS)"""
     gae_lambda: float = 0.95
@@ -121,7 +121,7 @@ class Args:
     target_kl: float = 0.1
     """the target KL divergence threshold"""
     reward_scale: float = 1.0
-    """Scale the reward by this factor"""
+    """Scale the reward by this factor; ignored by the residual, which normalizes by the running std"""
     eval_freq: int = 25
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
@@ -404,7 +404,8 @@ if __name__ == "__main__":
     print(f"####")
     action_space_low, action_space_high = torch.from_numpy(envs.single_action_space.low).to(device), torch.from_numpy(envs.single_action_space.high).to(device)
     def clip_action(action: torch.Tensor):
-        action = torch.clamp(action.detach(), action_space_low, action_space_high)
+        # the residual goes unclamped like ResiP's; ResidualWrapper clamps base + scaled residual
+        action = action.detach().clone() if args.base is not None else torch.clamp(action.detach(), action_space_low, action_space_high)
         if args.gripper_closed:
             # pd_ee_delta_pose gripper: -1 closes
             action[:, -1] = -1
@@ -626,6 +627,8 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         logger.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        if args.base is not None:
+            logger.add_scalar("charts/learning_rate_critic", optimizer.param_groups[1]["lr"], global_step)
         logger.add_scalar("losses/value_loss", v_loss.item(), global_step)
         logger.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         logger.add_scalar("losses/entropy", entropy_loss.item(), global_step)
