@@ -3,6 +3,7 @@ name = "robotics-manipulation"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
+    "diffusers>=0.43.0",
     "gymnasium>=1.4.0",
     "mani-skill>=3.0.1",
     "pin>=4.1.0",
