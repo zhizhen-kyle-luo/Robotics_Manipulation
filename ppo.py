@@ -1,4 +1,5 @@
 from collections import defaultdict
+import math
 import os
 import random
 import time
@@ -60,28 +61,30 @@ class Args:
     base_checkpoint: str = "base_ckpts/dp_seed1.pt"
     """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
     logstd_init: Optional[float] = None
-    """initial log std of the Gaussian policy; None picks -1.0 for the residual (ResiP) and -0.5 from scratch (ManiSkill baseline)"""
+    """initial log std of the Gaussian policy (fixed for the residual, as in ResiP); None picks the method default (METHOD_DEFAULTS)"""
     gripper_closed: bool = False
     """hold the gripper closed whatever the policy outputs. an untrained policy from scratch otherwise drops the peg within
     50 steps of every episode, which the residual cannot do: its base keeps the grasp and its correction is scaled by 0.1"""
     residual_scale: float = 0.1
     """residual action scale, from ResiP"""
     reward_mode: Optional[str] = None
-    """None picks sparse for the residual (ResiP) and normalized_dense for PPO from scratch (ManiSkill baseline)"""
+    """None picks the method default (METHOD_DEFAULTS)"""
     total_timesteps: int = 75_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
-    """the learning rate of the optimizer"""
-    num_envs: int = 2048
-    """the number of parallel environments"""
+    """the learning rate of the optimizer; the actor's alone for the residual"""
+    critic_learning_rate: float = 5e-3
+    """the residual critic's learning rate, from ResiP; PPO from scratch uses learning_rate for both"""
+    num_envs: Optional[int] = None
+    """the number of parallel environments; None picks the method default (METHOD_DEFAULTS)"""
     num_eval_envs: int = 16
     """the number of parallel evaluation environments"""
     partial_reset: bool = True
     """whether to let parallel environments reset upon termination instead of truncation"""
     eval_partial_reset: bool = False
     """whether to let parallel evaluation environments reset upon termination instead of truncation"""
-    num_steps: int = 16
-    """the number of steps to run in each environment per policy rollout"""
+    num_steps: Optional[int] = None
+    """the number of steps to run in each environment per policy rollout; None picks the method default (METHOD_DEFAULTS)"""
     max_episode_steps: int = 200
     """episode length; 200 matches the insertion-only Diffusion Policy evaluation, so every method gets the same time"""
     num_eval_steps: Optional[int] = None
@@ -95,14 +98,14 @@ class Args:
     """the control mode to use for the environment"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
-    gamma: float = 0.97
-    """the discount factor gamma"""
+    gamma: Optional[float] = None
+    """the discount factor gamma; None picks the method default (METHOD_DEFAULTS)"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
-    """the number of mini-batches"""
-    update_epochs: int = 8
-    """the K epochs to update the policy"""
+    num_minibatches: Optional[int] = None
+    """the number of mini-batches; None picks the method default (METHOD_DEFAULTS)"""
+    update_epochs: Optional[int] = None
+    """the K epochs to update the policy; None picks the method default (METHOD_DEFAULTS)"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
     clip_coef: float = 0.2
@@ -111,10 +114,10 @@ class Args:
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
     ent_coef: float = 0.0
     """coefficient of the entropy"""
-    vf_coef: float = 0.5
-    """coefficient of the value function"""
-    max_grad_norm: float = 0.5
-    """the maximum norm for the gradient clipping"""
+    vf_coef: Optional[float] = None
+    """coefficient of the value function; None picks the method default (METHOD_DEFAULTS)"""
+    max_grad_norm: Optional[float] = None
+    """the maximum norm for the gradient clipping; None picks the method default (METHOD_DEFAULTS)"""
     target_kl: float = 0.1
     """the target KL divergence threshold"""
     reward_scale: float = 1.0
@@ -139,6 +142,39 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+
+# settings that differ by method, as (PPO from scratch, residual): ManiSkill's PPO baseline for this task and
+# ResiP's base_residual_rl.yaml (github.com/ankile/robust-rearrangement). the residual's rollout is one whole
+# episode per iteration from freshly reset envs, as ResiP's num_env_steps with reset_every_iteration
+METHOD_DEFAULTS = dict(
+    reward_mode=("normalized_dense", "sparse"),
+    logstd_init=(-0.5, -1.0),
+    num_envs=(2048, 1024),
+    num_steps=(16, None),
+    num_minibatches=(32, 1),
+    update_epochs=(8, 50),
+    gamma=(0.97, 0.999),
+    vf_coef=(0.5, 1.0),
+    max_grad_norm=(0.5, 1.0),
+)
+RESIP_ACTOR_WARMUP_ITERATIONS = 5
+
+
+def resolve_method_defaults(args):
+    for name, (scratch, residual) in METHOD_DEFAULTS.items():
+        if getattr(args, name) is None:
+            setattr(args, name, scratch if args.base is None else residual)
+    if args.num_steps is None:
+        args.num_steps = args.max_episode_steps
+
+
+def cosine_with_warmup(step, warmup, total):
+    """learning rate multiplier of ResiP's scheduler (diffusers' cosine schedule with warmup) at a training iteration"""
+    if step < warmup:
+        return step / max(1, warmup)
+    progress = (step - warmup) / max(1, total - warmup)
+    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -188,6 +224,57 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
+class ResidualAgent(nn.Module):
+    """ResiP's ResidualPolicy with its residual_diffusion.yaml settings: ReLU MLPs of 2 x 256 for actor and critic,
+    an actor head that starts at exactly zero so training begins at the base, and a fixed std. the input is the env
+    obs with the base action appended by ResidualWrapper"""
+
+    def __init__(self, envs, logstd_init=-1.0):
+        super().__init__()
+        obs_dim = np.array(envs.single_observation_space.shape).prod()
+        act_dim = np.prod(envs.single_action_space.shape)
+        self.actor_mean = self.mlp(obs_dim, act_dim, head_std=0.0, head_bias=None)
+        self.critic = self.mlp(obs_dim, 1, head_std=0.25, head_bias=0.25)
+        self.actor_logstd = nn.Parameter(torch.ones(1, act_dim) * logstd_init, requires_grad=False)
+        self.reward_norm = RewardNormalizer(clip=5.0)
+
+    @staticmethod
+    def mlp(in_dim, out_dim, head_std, head_bias, hidden=256):
+        layers = []
+        for d in (in_dim, hidden):
+            linear = nn.Linear(d, hidden)
+            nn.init.kaiming_normal_(linear.weight, mode="fan_in", nonlinearity="relu")
+            nn.init.zeros_(linear.bias)
+            layers += [linear, nn.ReLU()]
+        head = nn.Linear(hidden, out_dim, bias=head_bias is not None)
+        nn.init.orthogonal_(head.weight, head_std)
+        if head_bias is not None:
+            nn.init.constant_(head.bias, head_bias)
+        return nn.Sequential(*layers, head)
+
+    get_value, get_action, get_action_and_value = Agent.get_value, Agent.get_action, Agent.get_action_and_value
+
+
+class RewardNormalizer(nn.Module):
+    """ResiP's RunningMeanStdClip: divides each step's reward by the running std of all rewards seen and clips.
+    a module so its statistics are saved and resumed with the agent"""
+
+    def __init__(self, clip):
+        super().__init__()
+        self.clip = clip
+        self.register_buffer("mean", torch.zeros(()))
+        self.register_buffer("var", torch.ones(()))
+        self.register_buffer("count", torch.tensor(1e-4))
+
+    def forward(self, x):
+        batch_mean, batch_var, n = x.mean(), x.var(unbiased=False), x.numel()
+        delta, total = batch_mean - self.mean, self.count + n
+        self.var.copy_((self.var * self.count + batch_var * n + delta ** 2 * self.count * n / total) / total)
+        self.mean += delta * n / total
+        self.count.copy_(total)
+        return torch.clamp(x / torch.sqrt(self.var + 1e-8), -self.clip, self.clip)
+
+
 def atomic_save(obj, path):
     """Save so that a kill mid-write leaves the previous file intact; resume trusts the newest checkpoint"""
     tmp = f"{path}.tmp"
@@ -208,15 +295,12 @@ class Logger:
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
+    resolve_method_defaults(args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     if args.num_eval_steps is None:
         args.num_eval_steps = args.max_episode_steps
-    if args.reward_mode is None:
-        args.reward_mode = "sparse" if args.base is not None else "normalized_dense"
-    if args.logstd_init is None:
-        args.logstd_init = -1.0 if args.base is not None else -0.5
     if args.exp_name is None:
         args.exp_name = os.path.basename(__file__)[: -len(".py")]
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -291,9 +375,15 @@ if __name__ == "__main__":
     else:
         print("Running evaluation")
 
-    # ResiP initial log std is -1.0; the actor's small-gain final layer already starts the residual near 0
-    agent = Agent(envs, args.logstd_init).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    if args.base is None:
+        agent = Agent(envs, args.logstd_init).to(device)
+        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    else:
+        agent = ResidualAgent(envs, args.logstd_init).to(device)
+        # ResiP's two AdamW optimizers as two param groups: Adam state is per parameter, so the updates are the same
+        optimizer = optim.AdamW([dict(params=agent.actor_mean.parameters(), lr=args.learning_rate),
+                                 dict(params=agent.critic.parameters(), lr=args.critic_learning_rate)],
+                                eps=1e-5, weight_decay=1e-6)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -347,8 +437,10 @@ if __name__ == "__main__":
         print(f"Epoch: {iteration}, global_step={global_step}")
         final_values = torch.zeros((args.num_steps, args.num_envs), device=device)
         agent.eval()
-        if train_pool is not None and train_pool.needs_reshuffle and iteration > start_iteration and iteration % args.starts_reshuffle_freq == 0:
-            # slots keep their geometry between full resets, so periodically draw a new batch of the pool
+        reshuffle = train_pool is not None and train_pool.needs_reshuffle and iteration % args.starts_reshuffle_freq == 0
+        # the residual starts every rollout from fresh episodes, as ResiP's reset_every_iteration; otherwise slots keep
+        # their geometry between full resets, so periodically draw a new batch of the pool
+        if iteration > start_iteration and (args.base is not None or reshuffle):
             next_obs, _ = envs.reset()
             next_done = torch.zeros(args.num_envs, device=device)
         if iteration % args.eval_freq == 1:
@@ -383,6 +475,11 @@ if __name__ == "__main__":
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
+        if args.base is not None:
+            # ResiP's cosine schedules; computed from the iteration so a resumed run needs no scheduler state
+            for group, lr, warmup in zip(optimizer.param_groups, (args.learning_rate, args.critic_learning_rate),
+                                         (RESIP_ACTOR_WARMUP_ITERATIONS, 0)):
+                group["lr"] = lr * cosine_with_warmup(iteration - 1, warmup, args.num_iterations)
 
         rollout_time = time.time()
         for step in range(0, args.num_steps):
@@ -400,7 +497,7 @@ if __name__ == "__main__":
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(clip_action(action))
             next_done = torch.logical_or(terminations, truncations).to(torch.float32)
-            rewards[step] = reward.view(-1) * args.reward_scale
+            rewards[step] = reward.view(-1) * args.reward_scale if args.base is None else agent.reward_norm(reward.view(-1).float())
 
             if "final_info" in infos:
                 final_info = infos["final_info"]
