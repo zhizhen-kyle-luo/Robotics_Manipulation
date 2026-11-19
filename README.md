@@ -12,8 +12,8 @@ uv run pytest tests
 ## Residual PPO
 
 ```bash
-uv run python ppo.py --base hold                               # clean residual (4), sparse reward by default
-uv run python ppo.py --base hold --hole-offset-range 0 0.004   # noise-trained residual (4')
+uv run python ppo.py --base dp                               # clean residual (4), ResiP's settings (METHOD_DEFAULTS in ppo.py)
+uv run python ppo.py --base dp --hole-offset-range 0 0.004   # noise-trained residual (4')
 uv run python ppo.py                                           # PPO from scratch (3), dense reward by default
 uv run python ppo.py <original flags> --checkpoint runs/<run>/ckpt_<i>.pt --exp-name <run>  # resume: repeat every original flag
 ```
