@@ -10,25 +10,27 @@ class DiffusionBase:
     """frozen Diffusion Policy (diffusion_policy/train.py on the data_setup branch) as the residual's base
 
     every base follows this interface: reset(mask) clears the memory of the masked envs, act(obs) returns this
-    control step's action for all envs and is called exactly once per env step. it reproduces the policy's own
-    evaluation: the network sees the last obs_horizon raw observations (an episode's first observation repeated,
-    as ManiSkill's FrameStack does), predicts pred_horizon actions with 100 DDPM steps, and executes act_horizon
+    control step's action for all envs and is called exactly once per env step, normalize(obs) maps env obs to
+    the scale the residual sees. it reproduces the policy's own evaluation: the network sees the last
+    obs_horizon raw observations (an episode's first observation repeated, as ManiSkill's FrameStack does)
+    z-scored with the training stats, predicts pred_horizon actions with 100 DDPM steps, and executes act_horizon
     of them before planning again. envs plan independently, since partial resets put them at different points
     of their chunks; the ones whose chunk ran out this step are denoised together as one batch
 
-    the checkpoint is a scripts/export_dp_base.py export: the EMA weights and the horizons they were trained with
+    the checkpoint is a scripts/export_dp_base.py export: the EMA weights, with obs_mean/obs_std if the policy
+    was trained with --norm-stats-path, and the config they were trained with
     """
 
     def __init__(self, checkpoint, num_envs, device):
         ckpt = torch.load(checkpoint, map_location=device, weights_only=True)
-        weights, cfg = ckpt["ema_agent"], ckpt["config"]
-        if any(k in weights for k in ("obs_mean", "obs_std")):
-            raise NotImplementedError("this Diffusion Policy was trained with observation normalization; "
-                                      "DiffusionBase feeds raw observations")
+        weights, cfg = dict(ckpt["ema_agent"]), ckpt["config"]
         self.obs_horizon, self.act_horizon, self.pred_horizon = cfg["obs_horizon"], cfg["act_horizon"], cfg["pred_horizon"]
         self.act_dim = weights["noise_pred_net.final_conv.1.weight"].shape[0]
         cond_dim = weights["noise_pred_net.mid_modules.0.cond_encoder.1.weight"].shape[1]
         self.obs_dim = (cond_dim - cfg["diffusion_step_embed_dim"]) // self.obs_horizon
+        # a policy trained without normalization has no stats; identity stats keep one code path
+        self.obs_mean = weights.pop("obs_mean", torch.zeros(self.obs_dim, device=device))
+        self.obs_std = weights.pop("obs_std", torch.ones(self.obs_dim, device=device))
         self.net = ConditionalUnet1D(input_dim=self.act_dim, global_cond_dim=self.obs_horizon * self.obs_dim,
                                      diffusion_step_embed_dim=cfg["diffusion_step_embed_dim"],
                                      down_dims=cfg["unet_dims"], n_groups=cfg["n_groups"]).to(device)
@@ -67,9 +69,13 @@ class DiffusionBase:
         self.step += 1
         return action
 
+    def normalize(self, obs):
+        # train.py's Agent.normalize: no epsilon, compute_norm.py already floors the std
+        return (obs - self.obs_mean) / self.obs_std
+
     def plan(self, obs_seq):
         """the training script's Agent.get_action: act_horizon actions for each (obs_horizon, obs_dim) history"""
-        cond = obs_seq.flatten(start_dim=1)
+        cond = self.normalize(obs_seq).flatten(start_dim=1)
         actions = torch.randn((obs_seq.shape[0], self.pred_horizon, self.act_dim), device=obs_seq.device)
         for k in self.scheduler.timesteps:
             noise = self.net(sample=actions, timestep=k, global_cond=cond)
@@ -81,9 +87,10 @@ class DiffusionBase:
 class ResidualWrapper(gym.vector.VectorWrapper):
     """ResiP residual: executes base action + scale * residual at every control step
 
-    the agent observes [env obs, base action for this step]; the frozen base sees the same env obs,
-    so a hole offset injected by the env reaches both. wraps a ManiSkillVectorEnv, whose auto-reset
-    returns the next episode's first obs for done envs, so the base is reset before it acts on them
+    the agent observes residual_input: the env obs normalized as the base normalizes it, then the base action
+    for this step; the frozen base sees the raw env obs, so a hole offset injected by the env reaches both.
+    wraps a ManiSkillVectorEnv, whose auto-reset returns the next episode's first obs for done envs, so the
+    base is reset before it acts on them
     """
 
     def __init__(self, env, base, scale):
@@ -106,11 +113,18 @@ class ResidualWrapper(gym.vector.VectorWrapper):
             mask = torch.ones(obs.shape[0], dtype=torch.bool, device=obs.device)
         self.base.reset(mask)
         self.base_action = self.base.act(obs)
-        return torch.cat([obs, self.base_action], -1), info
+        return residual_input(self.base, obs, self.base_action), info
 
     def step(self, actions):
         action = torch.clamp(self.base_action + self.scale * actions, self.action_low, self.action_high)
         obs, rew, terminations, truncations, infos = self.env.step(action)
         self.base.reset(terminations | truncations)
         self.base_action = self.base.act(obs)
-        return torch.cat([obs, self.base_action], -1), rew, terminations, truncations, infos
+        return residual_input(self.base, obs, self.base_action), rew, terminations, truncations, infos
+
+
+def residual_input(base, obs, base_action):
+    """ResiP's residual input (residual_ppo.py: next_nobs, base_naction): obs on the base's training scale, so a
+    few mm of hole error is not lost against metre-scale coordinates, then the base action, which is already in
+    the DP's (unnormalized, [-1, 1]) action space"""
+    return torch.cat([base.normalize(obs), base_action], -1)

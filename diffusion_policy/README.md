@@ -31,15 +31,19 @@ Recompute after changing the demo file.
 ### All seeds: `launch_dp.sh`
 
 ```bash
-./launch_dp.sh
+./launch_dp.sh                            # clean DP, seeds 0 1 2
+TAG=noise ./launch_dp.sh --hole-noise     # noise-augmented DP, seeds 0 1 2
 ```
 
-Starts one tmux session per seed (`dp<N>_s<seed>`, N = number of trajectories in the demo file) and trains
-on every trajectory in the file. It refuses to start if `diffusion_policy/` has uncommitted changes.
+Starts one tmux session per seed (`dp_<TAG>_s<seed>`, also the run name). Training uses every successful demo
+in the file, one per seed (649 of the 1000 in the current file; `train.py` logs the count). `--hole-noise` gives
+each demo an observed hole pose error (up to 6 mm in the hole plane and 1 deg), constant over the demo and redrawn
+every pass over the data. It refuses to start if `diffusion_policy/` has uncommitted changes.
 
 | env variable | default | meaning |
 |---|---|---|
 | `SEEDS` | `"0 1 2"` | seeds to launch |
+| `TAG` | `clean` | run name part |
 | `DATA` | `~/Robotics_Manipulation/data/dp_training` | folder with the demo `.h5` and `norm_stats.json` |
 | `PYTHON` | `../.venv/bin/python` | python interpreter |
 | `RESUME` | unset | checkpoint to resume from |
@@ -48,10 +52,10 @@ Any extra arguments are passed to `train.py`:
 
 ```bash
 SEEDS="3 4" ./launch_dp.sh --total_iters 50000
-RESUME=runs/dp_full1000_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
+RESUME=runs/dp_clean_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
 ```
 
-- Attach: `tmux attach -t dp1000_s0` (detach with `Ctrl-b d`)
+- Attach: `tmux attach -t dp_clean_s0` (detach with `Ctrl-b d`)
 - Log: `runs/logs/<exp>.log`
 - Checkpoints: `runs/<exp>/checkpoints/` (`<iter>.pt`, `best_eval_success_once.pt`, `best_eval_success_at_end.pt`, `final.pt`)
 - Curves: `../.venv/bin/tensorboard --logdir runs --port 6006`
@@ -62,10 +66,10 @@ RESUME=runs/dp_full1000_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
 ../.venv/bin/python train.py --env-id PegInsertionSide-v1 \
   --demo-path ../data/dp_training/trajectory.state.pd_ee_delta_pose.physx_cpu.h5 \
   --control-mode pd_ee_delta_pose --sim-backend physx_cpu \
-  --num-demos 1000 --max_episode_steps 300 --total_iters 100000 \
+  --max_episode_steps 300 --total_iters 100000 \
   --num_eval_envs 8 --save_freq 5000 \
   --norm-stats-path ../data/dp_training/norm_stats.json \
-  --seed 0 --exp-name dp_full1000_s0
+  --seed 0 --exp-name dp_clean_s0
 ```
 
 | option | default | meaning |
@@ -74,7 +78,8 @@ RESUME=runs/dp_full1000_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
 | `--demo-path` | | demo `.h5` file |
 | `--control-mode` | `pd_joint_delta_pos` | must match the demos (`pd_ee_delta_pose`) |
 | `--sim-backend` | `physx_cpu` | |
-| `--num-demos` | all | number of trajectories to load |
+| `--num-demos` | all | number of trajectories to load, from the successful one-per-seed demos |
+| `--hole-noise` | off | perturb the observed hole pose per demo (noise-augmented DP) |
 | `--norm-stats-path` | none | normalize observations with this `norm_stats.json`; without it, the original baseline (no normalization) |
 | `--resume` | none | continue from a checkpoint (`runs/<exp>/checkpoints/<tag>.pt`) |
 | `--seed` | `1` | |
@@ -123,6 +128,22 @@ Options are the same as `train.py`, except:
 | `--norm-stats-path`, `--resume` | not available | only added to `train.py` |
 
 `launch_dp.sh` only runs `train.py`. All options: `../.venv/bin/python train_rgbd.py --help`
+
+### Export for the residual and `evaluate.py`
+
+Run from the repo root. The export keeps the EMA weights and normalization stats and adds the config
+`residual.DiffusionBase` reads; pass any architecture flag the run changed.
+
+```bash
+for tag in clean noise; do for s in 0 1 2; do
+  uv run python scripts/export_dp_base.py diffusion_policy/runs/dp_${tag}_s$s/checkpoints/final.pt base_ckpts/dp_${tag}_s$s.pt
+  uv run python evaluate.py --policy dp_policy:make_dp --policy-kwargs "{\"checkpoint\": \"base_ckpts/dp_${tag}_s$s.pt\"}" \
+    --starts start_states/eval/states.pt --num-envs 100 --out results/dp_${tag}_s$s.json
+done; done
+uv run python ppo.py --base-checkpoint base_ckpts/dp_clean_s0.pt ...   # residual on one of them
+uv run python evaluate.py --policy dp_policy:make_residual --policy-kwargs '{"checkpoint": "runs/<run>/final_ckpt.pt"}' \
+  --starts start_states/eval/states.pt --num-envs 100 --out results/residual_<run>.json
+```
 
 ## 3. Evaluation from grasped start states: `eval_start_states.py`
 
