@@ -97,7 +97,7 @@ def test_sut_generated_states_restore_on_the_noisy_env():
     # generate_start_states.py saves a list of records from PegInsertionSide-v1; skipped until fetched
     path = "start_states/eval/states.pt"
     if not os.path.exists(path):
-        pytest.skip("run scripts/fetch_start_states.sh first")
+        pytest.skip("start_states/eval/states.pt is missing")
     env = gym.make("PegInsertionSideNoisy-v1", obs_mode="state", control_mode="pd_ee_delta_pose",
                    sim_backend="physx_cpu", hole_offset_range=(0.0, 0.004))
     starts = start_states.load(path)

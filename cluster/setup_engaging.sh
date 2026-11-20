@@ -9,7 +9,6 @@ if ! command -v uv >/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 uv sync
-bash scripts/fetch_start_states.sh
 
 # SAPIEN needs a Vulkan device even for state-only simulation. GPU nodes often ship the NVIDIA
 # driver without the Vulkan ICD file, so point the loader at the driver ourselves.

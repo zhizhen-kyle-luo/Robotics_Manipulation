@@ -35,9 +35,9 @@ uv run python evaluate.py --policy my_module:make_policy --policy-kwargs '{"chec
 
 - `evaluate.py` runs each start state once per hole offset (default 0, 2, 4, 6 mm). It reports `success_once` (primary) and `success_at_end` with Wilson 95% intervals, plus per-episode results in the JSON. Offset directions are seeded per (start index, magnitude), so every method sees identical offsets. A policy needs `reset()` and `act(obs)`, where `obs` is the batched `state_dict`; `common.flatten_state_dict(obs, use_torch=True)` gives the exact 43-dim `obs_mode="state"` vector.
 - `classical.py` is controller (1). It aligns the peg 2 cm in front of the observed hole, matching the square peg to the nearest quarter roll. It then pushes along the hole axis under the stiffness controller. On a stall at the rim (no progress for 4 steps) it spiral searches in the hole plane, pausing whenever the peg starts to drop. An integral term cancels gravity sag. Once the head is 5 mm past the success depth it stops pushing and holds, because servoing on against the walls walks the arm back and pulls the peg out. It is pure feedback on the observation, so the hole offset reaches it exactly as it reaches the learned methods.
-- `ClassicalBase` wraps it in `residual.py`'s base interface (`reset(mask)`, `act(flat_obs)`) to replace `HoldBase`.
+- `ClassicalBase` wraps it in `residual.py`'s base interface (`reset(mask)`, `act(flat_obs)`).
 - `start_states.py` loads start-state files: Sut's list of records from `generate_start_states.py`, or the dict that `save()` writes. The seed rebuilds the peg and hole geometry on reconfigure; `reset_to` checks that against the saved box height, which the task sets to the peg half length.
-- `scripts/fetch_start_states.sh` puts Sut's 1000 train and 500 held-out states in `start_states/` (they are in `data_setup`'s history, not at its tip).
+- `start_states/` holds Sut's 1000 train and 500 held-out states from `generate_start_states.py`.
 - `data/interim_test.pt` holds 50 stand-in states for the tests, made by `scripts/make_interim_start_states.py`. Nothing reported uses them.
 
 Classical controller on Sut's 500 held-out states (CPU sim, 200 steps):
@@ -54,8 +54,7 @@ Classical controller on Sut's 500 held-out states (CPU sim, 200 steps):
 ```bash
 ssh <kerb>@orcd-login.mit.edu
 git clone git@github.com:zhizhen-kyle-luo/Robotics_Manipulation.git && cd Robotics_Manipulation
-git switch kevin/ppo-start-states
-bash cluster/setup_engaging.sh                  # once, on the login node: uv env, start states, Vulkan ICD
+bash cluster/setup_engaging.sh                  # once, on the login node: uv env, Vulkan ICD
 sbatch cluster/smoke.sbatch                     # read logs/peg-smoke-<jobid>.out before training anything
 ```
 
