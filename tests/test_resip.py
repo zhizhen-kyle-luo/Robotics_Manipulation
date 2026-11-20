@@ -48,11 +48,7 @@ def test_reward_normalizer_divides_by_running_std_and_clips():
     assert norm(torch.full((4,), 1e6)).max() == 5.0
 
 
-def test_residual_defaults_follow_resip_and_explicit_flags_win():
-    args = ppo.Args(base="dp", gamma=0.99)
-    ppo.resolve_method_defaults(args)
-    assert (args.gamma, args.num_envs, args.num_steps, args.num_minibatches, args.update_epochs) == (0.99, 1024, 200, 1, 50)
-    assert (args.vf_coef, args.max_grad_norm, args.reward_mode, args.logstd_init) == (1.0, 1.0, "sparse", -1.0)
-    scratch = ppo.Args()
-    ppo.resolve_method_defaults(scratch)
-    assert (scratch.gamma, scratch.num_envs, scratch.num_steps, scratch.update_epochs) == (0.97, 2048, 16, 8)
+def test_defaults_follow_resip():
+    args = ppo.Args()
+    assert (args.gamma, args.num_envs, args.num_minibatches, args.update_epochs) == (0.999, 1024, 1, 50)
+    assert (args.vf_coef, args.max_grad_norm) == (1.0, 1.0)

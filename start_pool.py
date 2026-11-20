@@ -7,7 +7,7 @@ slot back into the start state its geometry was built for.
 With at least as many slots as states (1000 train states in 2048 slots, 500 eval states in 500
 slots), the pool is dealt out evenly once and every later reset reuses those slots: every state
 is already in play, and rebuilding the scene would only cost time. With fewer slots than states,
-a full reset draws a new random batch, and ppo.py calls one every --starts-reshuffle-freq iterations.
+a full reset draws a new random batch, and ppo.py calls one every iteration.
 """
 
 import gymnasium as gym

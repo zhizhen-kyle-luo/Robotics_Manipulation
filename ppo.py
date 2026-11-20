@@ -56,27 +56,20 @@ class Args:
     """physx_cuda for training, physx_cpu (num_envs 1) for local smoke tests"""
     hole_offset_range: tuple[float, float] = (0.0, 0.0)
     """observed hole offset magnitude range in metres; (0, 0.004) for the noise-trained residual"""
-    base: Optional[Literal["dp"]] = None
-    """frozen base policy for residual RL: dp is the Diffusion Policy in --base-checkpoint; None trains PPO from scratch"""
+    base: Literal["dp"] = "dp"
+    """frozen base policy for residual RL: dp is the Diffusion Policy in --base-checkpoint"""
     base_checkpoint: str = "base_ckpts/dp_seed1.pt"
     """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
-    logstd_init: Optional[float] = None
-    """initial log std of the Gaussian policy (fixed for the residual, as in ResiP); None picks the method default (METHOD_DEFAULTS)"""
-    gripper_closed: bool = False
-    """hold the gripper closed whatever the policy outputs. an untrained policy from scratch otherwise drops the peg within
-    50 steps of every episode, which the residual cannot do: its base keeps the grasp and its correction is scaled by 0.1"""
     residual_scale: float = 0.1
     """residual action scale, from ResiP"""
-    reward_mode: Optional[str] = None
-    """None picks the method default (METHOD_DEFAULTS)"""
     total_timesteps: int = 75_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
-    """the learning rate of the optimizer; the actor's alone for the residual"""
+    """the actor's learning rate"""
     critic_learning_rate: float = 5e-3
-    """the residual critic's learning rate, from ResiP; PPO from scratch uses learning_rate for both"""
-    num_envs: Optional[int] = None
-    """the number of parallel environments; None picks the method default (METHOD_DEFAULTS)"""
+    """the critic's learning rate, from ResiP"""
+    num_envs: int = 1024
+    """the number of parallel environments"""
     num_eval_envs: int = 16
     """the number of parallel evaluation environments"""
     partial_reset: bool = True
@@ -84,7 +77,8 @@ class Args:
     eval_partial_reset: bool = False
     """whether to let parallel evaluation environments reset upon termination instead of truncation"""
     num_steps: Optional[int] = None
-    """the number of steps to run in each environment per policy rollout; None picks the method default (METHOD_DEFAULTS)"""
+    """the number of steps to run in each environment per policy rollout; defaults to max_episode_steps, so a rollout is one
+    whole episode from freshly reset envs, as ResiP's num_env_steps with reset_every_iteration"""
     max_episode_steps: int = 200
     """episode length; 200 matches the insertion-only Diffusion Policy evaluation, so every method gets the same time"""
     num_eval_steps: Optional[int] = None
@@ -96,16 +90,14 @@ class Args:
     """for benchmarking purposes we want to reconfigure the eval environment each reset to ensure objects are randomized in some tasks"""
     control_mode: Optional[str] = "pd_ee_delta_pose"
     """the control mode to use for the environment"""
-    anneal_lr: bool = False
-    """Toggle learning rate annealing for policy and value networks; the residual always uses ResiP's cosine schedule"""
-    gamma: Optional[float] = None
-    """the discount factor gamma; None picks the method default (METHOD_DEFAULTS)"""
+    gamma: float = 0.999
+    """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: Optional[int] = None
-    """the number of mini-batches; None picks the method default (METHOD_DEFAULTS)"""
-    update_epochs: Optional[int] = None
-    """the K epochs to update the policy; None picks the method default (METHOD_DEFAULTS)"""
+    num_minibatches: int = 1
+    """the number of mini-batches"""
+    update_epochs: int = 50
+    """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
     clip_coef: float = 0.2
@@ -114,14 +106,12 @@ class Args:
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
     ent_coef: float = 0.0
     """coefficient of the entropy"""
-    vf_coef: Optional[float] = None
-    """coefficient of the value function; None picks the method default (METHOD_DEFAULTS)"""
-    max_grad_norm: Optional[float] = None
-    """the maximum norm for the gradient clipping; None picks the method default (METHOD_DEFAULTS)"""
+    vf_coef: float = 1.0
+    """coefficient of the value function"""
+    max_grad_norm: float = 1.0
+    """the maximum norm for the gradient clipping"""
     target_kl: float = 0.1
     """the target KL divergence threshold"""
-    reward_scale: float = 1.0
-    """Scale the reward by this factor; ignored by the residual, which normalizes by the running std"""
     eval_freq: int = 25
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
@@ -131,8 +121,6 @@ class Args:
     """saved grasped start states to train from (start_states.py format); None resets into the full task"""
     eval_starts: Optional[str] = None
     """saved start states for the in-training evaluation; defaults to --starts"""
-    starts_reshuffle_freq: int = 25
-    """with --starts, rebuild every slot from a new batch of the pool every this many iterations"""
 
 
     # to be filled in runtime
@@ -143,29 +131,8 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-# settings that differ by method, as (PPO from scratch, residual): ManiSkill's PPO baseline for this task and
-# ResiP's base_residual_rl.yaml (github.com/ankile/robust-rearrangement). the residual's rollout is one whole
-# episode per iteration from freshly reset envs, as ResiP's num_env_steps with reset_every_iteration
-METHOD_DEFAULTS = dict(
-    reward_mode=("normalized_dense", "sparse"),
-    logstd_init=(-0.5, -1.0),
-    num_envs=(2048, 1024),
-    num_steps=(16, None),
-    num_minibatches=(32, 1),
-    update_epochs=(8, 50),
-    gamma=(0.97, 0.999),
-    vf_coef=(0.5, 1.0),
-    max_grad_norm=(0.5, 1.0),
-)
+# the Args defaults and this warmup follow ResiP's base_residual_rl.yaml (github.com/ankile/robust-rearrangement)
 RESIP_ACTOR_WARMUP_ITERATIONS = 5
-
-
-def resolve_method_defaults(args):
-    for name, (scratch, residual) in METHOD_DEFAULTS.items():
-        if getattr(args, name) is None:
-            setattr(args, name, scratch if args.base is None else residual)
-    if args.num_steps is None:
-        args.num_steps = args.max_episode_steps
 
 
 def cosine_with_warmup(step, warmup, total):
@@ -176,34 +143,33 @@ def cosine_with_warmup(step, warmup, total):
     return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+class ResidualAgent(nn.Module):
+    """ResiP's ResidualPolicy with its residual_diffusion.yaml settings: ReLU MLPs of 2 x 256 for actor and critic,
+    an actor head that starts at exactly zero so training begins at the base, and a fixed std. the input is the env
+    obs with the base action appended by ResidualWrapper"""
 
-
-class Agent(nn.Module):
-    def __init__(self, envs, logstd_init):
+    def __init__(self, envs):
         super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 1)),
-        )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01*np.sqrt(2)),
-        )
-        self.actor_logstd = nn.Parameter(torch.ones(1, np.prod(envs.single_action_space.shape)) * logstd_init)
+        obs_dim = np.array(envs.single_observation_space.shape).prod()
+        act_dim = np.prod(envs.single_action_space.shape)
+        self.actor_mean = self.mlp(obs_dim, act_dim, head_std=0.0, head_bias=None)
+        self.critic = self.mlp(obs_dim, 1, head_std=0.25, head_bias=0.25)
+        self.actor_logstd = nn.Parameter(torch.full((1, act_dim), -1.0), requires_grad=False)
+        self.reward_norm = RewardNormalizer(clip=5.0)
+
+    @staticmethod
+    def mlp(in_dim, out_dim, head_std, head_bias, hidden=256):
+        layers = []
+        for d in (in_dim, hidden):
+            linear = nn.Linear(d, hidden)
+            nn.init.kaiming_normal_(linear.weight, mode="fan_in", nonlinearity="relu")
+            nn.init.zeros_(linear.bias)
+            layers += [linear, nn.ReLU()]
+        head = nn.Linear(hidden, out_dim, bias=head_bias is not None)
+        nn.init.orthogonal_(head.weight, head_std)
+        if head_bias is not None:
+            nn.init.constant_(head.bias, head_bias)
+        return nn.Sequential(*layers, head)
 
     def get_value(self, x):
         return self.critic(x)
@@ -223,36 +189,6 @@ class Agent(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
-
-class ResidualAgent(nn.Module):
-    """ResiP's ResidualPolicy with its residual_diffusion.yaml settings: ReLU MLPs of 2 x 256 for actor and critic,
-    an actor head that starts at exactly zero so training begins at the base, and a fixed std. the input is the env
-    obs with the base action appended by ResidualWrapper"""
-
-    def __init__(self, envs, logstd_init=-1.0):
-        super().__init__()
-        obs_dim = np.array(envs.single_observation_space.shape).prod()
-        act_dim = np.prod(envs.single_action_space.shape)
-        self.actor_mean = self.mlp(obs_dim, act_dim, head_std=0.0, head_bias=None)
-        self.critic = self.mlp(obs_dim, 1, head_std=0.25, head_bias=0.25)
-        self.actor_logstd = nn.Parameter(torch.ones(1, act_dim) * logstd_init, requires_grad=False)
-        self.reward_norm = RewardNormalizer(clip=5.0)
-
-    @staticmethod
-    def mlp(in_dim, out_dim, head_std, head_bias, hidden=256):
-        layers = []
-        for d in (in_dim, hidden):
-            linear = nn.Linear(d, hidden)
-            nn.init.kaiming_normal_(linear.weight, mode="fan_in", nonlinearity="relu")
-            nn.init.zeros_(linear.bias)
-            layers += [linear, nn.ReLU()]
-        head = nn.Linear(hidden, out_dim, bias=head_bias is not None)
-        nn.init.orthogonal_(head.weight, head_std)
-        if head_bias is not None:
-            nn.init.constant_(head.bias, head_bias)
-        return nn.Sequential(*layers, head)
-
-    get_value, get_action, get_action_and_value = Agent.get_value, Agent.get_action, Agent.get_action_and_value
 
 
 class RewardNormalizer(nn.Module):
@@ -295,7 +231,8 @@ class Logger:
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    resolve_method_defaults(args)
+    if args.num_steps is None:
+        args.num_steps = args.max_episode_steps
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
@@ -315,15 +252,14 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     # env setup
-    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend=args.sim_backend, reward_mode=args.reward_mode,
+    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend=args.sim_backend, reward_mode="sparse",
                       hole_offset_range=args.hole_offset_range, max_episode_steps=args.max_episode_steps)
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
-    train_pool = None
     if args.starts is not None:
-        envs = train_pool = StartPoolWrapper(envs, args.starts, seed=args.seed)
+        envs = StartPoolWrapper(envs, args.starts, seed=args.seed)
         eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
@@ -344,10 +280,9 @@ if __name__ == "__main__":
     device = envs.device
 
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs._env)
-    if args.base is not None:
-        # one frozen copy per vector env: each keeps its own envs' observation histories and action chunks
-        envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale)
-        eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale)
+    # one frozen copy per vector env: each keeps its own envs' observation histories and action chunks
+    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale)
+    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale)
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -375,15 +310,11 @@ if __name__ == "__main__":
     else:
         print("Running evaluation")
 
-    if args.base is None:
-        agent = Agent(envs, args.logstd_init).to(device)
-        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-    else:
-        agent = ResidualAgent(envs, args.logstd_init).to(device)
-        # ResiP's two AdamW optimizers as two param groups: Adam state is per parameter, so the updates are the same
-        optimizer = optim.AdamW([dict(params=agent.actor_mean.parameters(), lr=args.learning_rate),
-                                 dict(params=agent.critic.parameters(), lr=args.critic_learning_rate)],
-                                eps=1e-5, weight_decay=1e-6)
+    agent = ResidualAgent(envs).to(device)
+    # ResiP's two AdamW optimizers as two param groups: Adam state is per parameter, so the updates are the same
+    optimizer = optim.AdamW([dict(params=agent.actor_mean.parameters(), lr=args.learning_rate),
+                             dict(params=agent.critic.parameters(), lr=args.critic_learning_rate)],
+                            eps=1e-5, weight_decay=1e-6)
 
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
@@ -402,24 +333,13 @@ if __name__ == "__main__":
     print(f"args.num_iterations={args.num_iterations} args.num_envs={args.num_envs} args.num_eval_envs={args.num_eval_envs}")
     print(f"args.minibatch_size={args.minibatch_size} args.batch_size={args.batch_size} args.update_epochs={args.update_epochs}")
     print(f"####")
-    action_space_low, action_space_high = torch.from_numpy(envs.single_action_space.low).to(device), torch.from_numpy(envs.single_action_space.high).to(device)
-    def clip_action(action: torch.Tensor):
-        # the residual goes unclamped like ResiP's; ResidualWrapper clamps base + scaled residual
-        action = action.detach().clone() if args.base is not None else torch.clamp(action.detach(), action_space_low, action_space_high)
-        if args.gripper_closed:
-            # pd_ee_delta_pose gripper: -1 closes
-            action[:, -1] = -1
-        return action
 
     start_iteration = 1
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
         agent.load_state_dict(ckpt["agent"])
         if not args.evaluate:
-            # a resubmit that forgets --gripper-closed would silently hand the gripper to the policy mid-run
-            if ckpt.get("gripper_closed", False) != args.gripper_closed:
-                raise ValueError(f"--gripper-closed={args.gripper_closed} but {args.checkpoint} was trained with {ckpt.get('gripper_closed', False)}")
-            # likewise a resubmit that forgets --base would continue a residual as PPO from scratch
+            # a from-scratch PPO checkpoint has no base
             if ckpt.get("base") != args.base:
                 raise ValueError(f"--base={args.base} but {args.checkpoint} was trained with {ckpt.get('base')}")
             # resume after a cluster time limit: continue the step count so learning curves stay aligned
@@ -436,12 +356,9 @@ if __name__ == "__main__":
     start_global_step, start_time = global_step, time.time()
     for iteration in range(start_iteration, args.num_iterations + 1):
         print(f"Epoch: {iteration}, global_step={global_step}")
-        final_values = torch.zeros((args.num_steps, args.num_envs), device=device)
         agent.eval()
-        reshuffle = train_pool is not None and train_pool.needs_reshuffle and iteration % args.starts_reshuffle_freq == 0
-        # the residual starts every rollout from fresh episodes, as ResiP's reset_every_iteration; otherwise slots keep
-        # their geometry between full resets, so periodically draw a new batch of the pool
-        if iteration > start_iteration and (args.base is not None or reshuffle):
+        # every rollout starts from fresh episodes, as ResiP's reset_every_iteration
+        if iteration > start_iteration:
             next_obs, _ = envs.reset()
             next_done = torch.zeros(args.num_envs, device=device)
         if iteration % args.eval_freq == 1:
@@ -451,7 +368,7 @@ if __name__ == "__main__":
             num_episodes = 0
             for _ in range(args.num_eval_steps):
                 with torch.no_grad():
-                    eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(clip_action(agent.get_action(eval_obs, deterministic=True)))
+                    eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(agent.get_action(eval_obs, deterministic=True))
                     if "final_info" in eval_infos:
                         mask = eval_infos["_final_info"]
                         num_episodes += mask.sum()
@@ -468,19 +385,13 @@ if __name__ == "__main__":
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=iteration, global_step=global_step, gripper_closed=args.gripper_closed,
-                             base=args.base, base_checkpoint=args.base_checkpoint if args.base else None), model_path)
+                             iteration=iteration, global_step=global_step,
+                             base=args.base, base_checkpoint=args.base_checkpoint), model_path)
             print(f"model saved to {model_path}")
-        # Annealing the rate if instructed to do so.
-        if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-        if args.base is not None:
-            # ResiP's cosine schedules; computed from the iteration so a resumed run needs no scheduler state
-            for group, lr, warmup in zip(optimizer.param_groups, (args.learning_rate, args.critic_learning_rate),
-                                         (RESIP_ACTOR_WARMUP_ITERATIONS, 0)):
-                group["lr"] = lr * cosine_with_warmup(iteration - 1, warmup, args.num_iterations)
+        # ResiP's cosine schedules; computed from the iteration so a resumed run needs no scheduler state
+        for group, lr, warmup in zip(optimizer.param_groups, (args.learning_rate, args.critic_learning_rate),
+                                     (RESIP_ACTOR_WARMUP_ITERATIONS, 0)):
+            group["lr"] = lr * cosine_with_warmup(iteration - 1, warmup, args.num_iterations)
 
         rollout_time = time.time()
         for step in range(0, args.num_steps):
@@ -496,19 +407,16 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, terminations, truncations, infos = envs.step(clip_action(action))
+            # the residual goes unclamped like ResiP's; ResidualWrapper clamps base + scaled residual
+            next_obs, reward, terminations, truncations, infos = envs.step(action)
             next_done = torch.logical_or(terminations, truncations).to(torch.float32)
-            rewards[step] = reward.view(-1) * args.reward_scale if args.base is None else agent.reward_norm(reward.view(-1).float())
+            rewards[step] = agent.reward_norm(reward.view(-1).float())
 
             if "final_info" in infos:
                 final_info = infos["final_info"]
                 done_mask = infos["_final_info"]
                 for k, v in final_info["episode"].items():
                     logger.add_scalar(f"train/{k}", v[done_mask].float().mean(), global_step)
-                # residual follows ResiP: no bootstrap at episode end, since the terminal obs has no base action
-                if args.base is None:
-                    with torch.no_grad():
-                        final_values[step, torch.arange(args.num_envs, device=device)[done_mask]] = agent.get_value(infos["final_observation"][done_mask]).view(-1)
         rollout_time = time.time() - rollout_time
         # bootstrap value according to termination and truncation
         with torch.no_grad():
@@ -522,10 +430,8 @@ if __name__ == "__main__":
                 else:
                     next_not_done = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                real_next_values = next_not_done * nextvalues + final_values[t] # t instead of t+1
-                # next_not_done means nextvalues is computed from the correct next_obs
-                # if next_not_done is 1, final_values is always 0
-                # if next_not_done is 0, then use final_values, which is computed according to bootstrap_at_done
+                # no bootstrap at episode end, as ResiP, since the terminal obs has no base action
+                real_next_values = next_not_done * nextvalues
                 if args.finite_horizon_gae:
                     """
                     See GAE paper equation(16) line 1, we will compute the GAE based on this line only
@@ -627,8 +533,7 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         logger.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        if args.base is not None:
-            logger.add_scalar("charts/learning_rate_critic", optimizer.param_groups[1]["lr"], global_step)
+        logger.add_scalar("charts/learning_rate_critic", optimizer.param_groups[1]["lr"], global_step)
         logger.add_scalar("losses/value_loss", v_loss.item(), global_step)
         logger.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         logger.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -647,8 +552,8 @@ if __name__ == "__main__":
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=args.num_iterations + 1, global_step=global_step, gripper_closed=args.gripper_closed,
-                             base=args.base, base_checkpoint=args.base_checkpoint if args.base else None), model_path)
+                             iteration=args.num_iterations + 1, global_step=global_step,
+                             base=args.base, base_checkpoint=args.base_checkpoint), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()
