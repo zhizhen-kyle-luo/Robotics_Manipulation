@@ -5,7 +5,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.structs.pose import Pose
 
 
-@register_env("PegInsertionSideNoisy-v1", max_episode_steps=100)
+@register_env("PegInsertionSideNoisy-v1", max_episode_steps=200)
 class PegInsertionSideNoisyEnv(PegInsertionSideEnv):
     """PegInsertionSide-v1 whose observed hole pose is wrong by a per-episode offset
 
