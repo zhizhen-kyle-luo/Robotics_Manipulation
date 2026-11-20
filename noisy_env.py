@@ -7,24 +7,30 @@ from mani_skill.utils.structs.pose import Pose
 
 @register_env("PegInsertionSideNoisy-v1", max_episode_steps=200)
 class PegInsertionSideNoisyEnv(PegInsertionSideEnv):
-    """PegInsertionSide-v1 whose observed hole pose is wrong by a per-episode offset
+    """PegInsertionSide-v1 whose observed hole pose is wrong by a per-episode offset and rotation
 
     exists so every method (base and residual alike) sees the same wrong hole estimate. the offset
     magnitude is drawn from U[hole_offset_range] metres and its direction uniformly in the plane
-    normal to the insertion axis, once per episode. only the observation changes: the physical box,
-    reward and success all use the true pose. (r, r) gives the fixed sweep offset, (0, 0.004) the
-    noise-trained residual
+    normal to the insertion axis, once per episode. the rotation angle is drawn from
+    U[hole_rot_range_deg] degrees about a uniformly random 3D axis in the hole frame, also once per
+    episode. only the observation changes: the physical box, reward and success all use the true
+    pose. (r, r) gives the fixed sweep offset, (0, 0.006) and (0, 1) the noise-trained residual
     """
 
-    def __init__(self, *args, hole_offset_range=(0.0, 0.0), **kwargs):
-        if not 0 <= hole_offset_range[0] <= hole_offset_range[1]:
-            raise ValueError(f"hole_offset_range must satisfy 0 <= low <= high, got {hole_offset_range}")
+    def __init__(self, *args, hole_offset_range=(0.0, 0.0), hole_rot_range_deg=(0.0, 0.0), **kwargs):
+        for name, (low, high) in [("hole_offset_range", hole_offset_range), ("hole_rot_range_deg", hole_rot_range_deg)]:
+            if not 0 <= low <= high:
+                raise ValueError(f"{name} must satisfy 0 <= low <= high, got {(low, high)}")
         self.hole_offset_range = hole_offset_range
+        self.hole_rot_range_deg = hole_rot_range_deg
         super().__init__(*args, **kwargs)
 
     def _load_scene(self, options: dict):
         super()._load_scene(options)
         self.hole_offsets = torch.zeros((self.num_envs, 3), device=self.device)
+        # wxyz quaternion of the observed hole frame in the true hole frame
+        self.hole_rots = torch.zeros((self.num_envs, 4), device=self.device)
+        self.hole_rots[:, 0] = 1
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
@@ -47,9 +53,19 @@ class PegInsertionSideNoisyEnv(PegInsertionSideEnv):
         self.hole_offsets[env_idx, 1] = magnitude * torch.cos(angle)
         self.hole_offsets[env_idx, 2] = magnitude * torch.sin(angle)
 
+        low, high = self.hole_rot_range_deg
+        if high == 0:
+            # draw nothing, so runs without rotation error consume the torch rng exactly as before
+            return
+        rot_angle = torch.deg2rad(torch.rand(b, device=self.device) * (high - low) + low)
+        axis = torch.nn.functional.normalize(torch.randn((b, 3), device=self.device), dim=1)
+        self.hole_rots[env_idx] = torch.cat([torch.cos(rot_angle / 2)[:, None],
+                                             torch.sin(rot_angle / 2)[:, None] * axis], 1)
+
     @property
     def observed_hole_pose(self):
-        return self.box_hole_pose * Pose.create_from_pq(p=self.hole_offsets)
+        # the offset is applied in the true hole frame, so the rotation leaves the observed position unchanged
+        return self.box_hole_pose * Pose.create_from_pq(p=self.hole_offsets, q=self.hole_rots)
 
     def _get_obs_extra(self, info: dict):
         obs = super()._get_obs_extra(info)
