@@ -38,10 +38,13 @@ class DPPolicy:
     def act(self, obs):
         obs = common.flatten_state_dict(obs, use_torch=True).to(self.base.device)
         base_action = self.base.act(obs)
+        # read by evaluate.py --log-steps; the residual is logged after scaling, as it is added to the base
+        self.last_base_action = base_action
         if self.residual is None:
             return base_action
         residual = self.residual.get_action(residual_input(self.base, obs, base_action), deterministic=True)
-        return torch.clamp(base_action + self.scale * residual, self.action_low, self.action_high)
+        self.last_residual_action = self.scale * residual
+        return torch.clamp(base_action + self.last_residual_action, self.action_low, self.action_high)
 
 
 def make_dp(num_envs, env, checkpoint):
