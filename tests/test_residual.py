@@ -20,6 +20,9 @@ class StubBase:
     def act(self, obs):
         return torch.zeros((obs.shape[0], self.act_dim), device=obs.device)
 
+    def normalize(self, obs):
+        return obs
+
 
 def make_env(hole_offset_range, hole_rot_range_deg=(0.0, 0.0)):
     env = gym.make("PegInsertionSideNoisy-v1", obs_mode="state", control_mode="pd_ee_delta_pose",
