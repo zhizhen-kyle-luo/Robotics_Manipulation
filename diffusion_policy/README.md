@@ -14,7 +14,7 @@ Data used by default:
 Recompute after changing the demo file.
 
 ```bash
-../.venv/bin/python ../compute_norm.py \
+../.venv/bin/python compute_norm.py \
   --demo-path ../data/dp_training/trajectory.state.pd_ee_delta_pose.physx_cpu.h5 \
   --output-dir ../data/dp_training
 ```
