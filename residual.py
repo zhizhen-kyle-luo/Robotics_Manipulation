@@ -109,6 +109,9 @@ class ResidualWrapper(gym.vector.VectorWrapper):
             # partial reset: only the listed envs start a new episode
             mask = torch.zeros(obs.shape[0], dtype=torch.bool, device=obs.device)
             mask[options["env_idx"]] = True
+            # base.act advances every env's chunk and history, so acting here would skip actions in the others
+            if not mask.all():
+                raise NotImplementedError("partial reset through ResidualWrapper; reset all envs or rely on auto-reset")
         else:
             mask = torch.ones(obs.shape[0], dtype=torch.bool, device=obs.device)
         self.base.reset(mask)
