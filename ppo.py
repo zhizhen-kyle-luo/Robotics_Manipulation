@@ -367,7 +367,7 @@ if __name__ == "__main__":
         if iteration > start_iteration:
             next_obs, _ = envs.reset()
             next_done = torch.zeros(args.num_envs, device=device)
-        if iteration % args.eval_freq == 1:
+        if (iteration - 1) % args.eval_freq == 0:
             print("Evaluating")
             eval_obs, _ = eval_envs.reset()
             eval_metrics = defaultdict(list)
@@ -388,7 +388,7 @@ if __name__ == "__main__":
                 print(f"eval_{k}_mean={mean}")
             if args.evaluate:
                 break
-        if args.save_model and iteration % args.eval_freq == 1:
+        if args.save_model and (iteration - 1) % args.eval_freq == 0:
             # ResiP keeps the checkpoint with the best in-training eval success (residual_ppo.py:428)
             eval_success = torch.stack(eval_metrics["success_once"]).float().mean().item()
             is_best = eval_success > best_eval_success
@@ -566,7 +566,7 @@ if __name__ == "__main__":
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=args.num_iterations + 1, global_step=global_step,
+                             iteration=args.num_iterations + 1, global_step=global_step, best_eval_success=best_eval_success,
                              base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale), model_path)
             print(f"model saved to {model_path}")
         logger.close()
