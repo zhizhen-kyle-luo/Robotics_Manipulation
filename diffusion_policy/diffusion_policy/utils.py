@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 from h5py import Dataset, File, Group
+from mani_skill.utils.geometry.rotation_conversions import quaternion_apply, quaternion_multiply
 from torch.utils.data.sampler import Sampler
 
 
@@ -158,6 +159,34 @@ def load_demo_dataset(
                 type(dataset[target_key][0]),
             )
     return dataset
+
+
+# box_hole_pose (p, then wxyz q) in PegInsertionSide's 43-dim state obs, after qpos 9, qvel 9, tcp_pose 7,
+# peg_pose 7 and peg_half_size 3
+HOLE_POSE = slice(35, 42)
+
+
+def sample_hole_noise(n, device):
+    """n hole-frame pose errors, (n, 7) as p then wxyz q
+
+    the error model of the noisy evaluation: a shift uniform in [0, 6 mm] along a random direction in the hole's
+    y-z plane (x is the insertion axis) and a rotation uniform in [0, 1 deg] about a uniformly random 3D axis
+    """
+    shift = torch.rand(n, device=device) * 0.006
+    direction = torch.rand(n, device=device) * 2 * torch.pi
+    p = torch.stack([torch.zeros_like(shift), shift * torch.cos(direction), shift * torch.sin(direction)], -1)
+    angle = torch.rand(n, device=device) * np.deg2rad(1.0)
+    axis = F.normalize(torch.randn(n, 3, device=device), dim=-1)
+    q = torch.cat([torch.cos(angle / 2)[:, None], torch.sin(angle / 2)[:, None] * axis], -1)
+    return torch.cat([p, q], -1)
+
+
+def perturb_hole_pose(obs, noise):
+    """obs (..., 43) whose observed hole pose is hole_pose * noise, the hole-frame composition noisy_env uses"""
+    hole_p, hole_q = obs[..., HOLE_POSE][..., :3], obs[..., HOLE_POSE][..., 3:]
+    p = hole_p + quaternion_apply(hole_q, noise[..., :3].expand_as(hole_p))
+    q = quaternion_multiply(hole_q, noise[..., 3:].expand_as(hole_q))
+    return torch.cat([obs[..., :HOLE_POSE.start], p, q, obs[..., HOLE_POSE.stop:]], -1)
 
 
 def convert_obs(obs, concat_fn, transpose_fn, state_obs_extractor, depth = True):

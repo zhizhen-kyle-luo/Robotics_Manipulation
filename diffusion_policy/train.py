@@ -18,7 +18,7 @@ from collections import defaultdict
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.sampler import RandomSampler, BatchSampler
 from torch.utils.data.dataloader import DataLoader
-from diffusion_policy.utils import IterationBasedBatchSampler, worker_init_fn
+from diffusion_policy.utils import IterationBasedBatchSampler, perturb_hole_pose, sample_hole_noise, worker_init_fn
 from diffusion_policy.make_env import make_eval_envs
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from diffusers.training_utils import EMAModel
@@ -95,6 +95,9 @@ class Args:
     """path to a norm_stats.json ({"norm_stats": {"state": {"mean", "std", ...}}}). If given, observations are
     z-scored inside the Agent with these stats (stored as buffers, so they travel with checkpoints). Actions are not normalized.
     If None, observations are used raw, exactly like the original baseline."""
+    hole_noise: bool = False
+    """if toggled, each demo's observed hole pose is wrong by a hole-frame error (up to 6 mm in the hole plane and
+    1 deg), constant over the demo and redrawn every pass over the data. Actions are unchanged."""
     resume: Optional[str] = None
     """path to a checkpoint .pt saved by this script. Restores agent, EMA, optimizer, lr scheduler, RNG states and the iteration counter."""
 
@@ -148,6 +151,14 @@ class SmallDemoDataset_DiffusionPolicy(Dataset): # Load everything into GPU memo
         print(f"Total transitions: {total_transitions}, Total obs sequences: {len(self.slices)}")
 
         self.trajectories = trajectories
+        self.hole_noise = None
+        if args.hole_noise:
+            self.resample_hole_noise()
+
+    def resample_hole_noise(self):
+        # one error per demo, shared by all of its steps, as the evaluation holds the error for a whole episode
+        observations = self.trajectories['observations']
+        self.hole_noise = sample_hole_noise(len(observations), observations[0].device)
 
     def __getitem__(self, index):
         traj_idx, start, end = self.slices[index]
@@ -164,6 +175,8 @@ class SmallDemoDataset_DiffusionPolicy(Dataset): # Load everything into GPU memo
             pad_action = torch.cat((self.pad_action_arm, gripper_action[None]), dim=0)
             act_seq = torch.cat([act_seq, pad_action.repeat(end-L, 1)], dim=0)
             # making the robot (arm and gripper) stay still
+        if self.hole_noise is not None:
+            obs_seq = perturb_hole_pose(obs_seq, self.hole_noise[traj_idx])
         assert obs_seq.shape[0] == self.obs_horizon and act_seq.shape[0] == self.pred_horizon
         return {
             'observations': obs_seq,
@@ -338,6 +351,8 @@ if __name__ == "__main__":
 
     assert args.obs_horizon + args.act_horizon - 1 <= args.pred_horizon
     assert args.obs_horizon >= 1 and args.act_horizon >= 1 and args.pred_horizon >= 1
+    # worker processes hold copies of the dataset that would never see the resampled hole errors
+    assert not (args.hole_noise and args.num_dataload_workers > 0)
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -499,6 +514,11 @@ if __name__ == "__main__":
         last_tick = time.time()
         ema.step(agent.parameters())
         timings["ema"] += time.time() - last_tick
+
+        # new hole errors for the next pass over the data; batches are built in this process, so the next batch
+        # already sees them
+        if args.hole_noise and (iteration + 1) % len(batch_sampler.batch_sampler) == 0:
+            dataset.resample_hole_noise()
 
         # Evaluation
         evaluate_and_save_best(iteration)
