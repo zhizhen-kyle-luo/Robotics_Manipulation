@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -81,13 +83,32 @@ def load_hdf5(
     return ret
 
 
+def clean_traj_keys(json_path):
+    """h5 keys of the successful demos, one per seed
+
+    the planner's demo file repeats seeds (byte-identical actions) and keeps failed attempts, so training on it
+    as is double counts some scenes and imitates failures. episodes are kept in episode_id order, so the first
+    successful demo of each seed survives
+    """
+    with open(json_path) as f:
+        episodes = sorted(json.load(f)["episodes"], key=lambda e: e["episode_id"])
+    keys, seeds = [], set()
+    for e in episodes:
+        if e["success"] and e["episode_seed"] not in seeds:
+            seeds.add(e["episode_seed"])
+            keys.append(f"traj_{e['episode_id']}")
+    num_failed = sum(not e["success"] for e in episodes)
+    print(f"Kept {len(keys)} of {len(episodes)} demos: dropped {num_failed} failed and "
+          f"{len(episodes) - num_failed - len(keys)} repeated seeds")
+    return keys
+
+
 def load_traj_hdf5(path, num_traj=None):
     print("Loading HDF5 file", path)
     file = File(path, "r")
-    keys = list(file.keys())
+    keys = clean_traj_keys(path[:-len(".h5")] + ".json")
     if num_traj is not None:
         assert num_traj <= len(keys), f"num_traj: {num_traj} > len(keys): {len(keys)}"
-        keys = sorted(keys, key=lambda x: int(x.split("_")[-1]))
         keys = keys[:num_traj]
     ret = {key: load_content_from_h5_file(file[key]) for key in keys}
     file.close()
@@ -102,10 +123,10 @@ def load_demo_dataset(
     raw_data = load_traj_hdf5(path, num_traj)
     # raw_data has keys like: ['traj_0', 'traj_1', ...]
     # raw_data['traj_0'] has keys like: ['actions', 'dones', 'env_states', 'infos', ...]
-    _traj = raw_data["traj_0"]
+    _traj = next(iter(raw_data.values()))  # traj_0 may have been filtered out
     for key in keys:
         source_key = TARGET_KEY_TO_SOURCE_KEY[key]
-        assert source_key in _traj, f"key: {source_key} not in traj_0: {_traj.keys()}"
+        assert source_key in _traj, f"key: {source_key} not in the first traj: {_traj.keys()}"
     dataset = {}
     for target_key in keys:
         # if 'next' in target_key:
@@ -115,13 +136,13 @@ def load_demo_dataset(
         if isinstance(dataset[target_key][0], np.ndarray) and concat:
             if target_key in ["observations", "states"] and len(
                 dataset[target_key][0]
-            ) > len(raw_data["traj_0"]["actions"]):
+            ) > len(_traj["actions"]):
                 dataset[target_key] = np.concatenate(
                     [t[:-1] for t in dataset[target_key]], axis=0
                 )
             elif target_key in ["next_observations", "next_states"] and len(
                 dataset[target_key][0]
-            ) > len(raw_data["traj_0"]["actions"]):
+            ) > len(_traj["actions"]):
                 dataset[target_key] = np.concatenate(
                     [t[1:] for t in dataset[target_key]], axis=0
                 )
