@@ -60,7 +60,7 @@ class Args:
     """training envs' observed hole rotation error range in degrees; (0, 1) for the noise-trained residual"""
     base: Literal["dp"] = "dp"
     """frozen base policy for residual RL: dp is the Diffusion Policy in --base-checkpoint"""
-    base_checkpoint: str = "base_ckpts/dp_seed1.pt"
+    base_checkpoint: str = "base_ckpts/dp_clean_s0.pt"
     """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
     residual_scale: float = 0.1
     """residual action scale, from ResiP"""
@@ -395,7 +395,7 @@ if __name__ == "__main__":
             best_eval_success = max(best_eval_success, eval_success)
             state = dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
                          iteration=iteration, global_step=global_step, best_eval_success=best_eval_success,
-                         base=args.base, base_checkpoint=args.base_checkpoint)
+                         base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale)
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             atomic_save(state, model_path)
             print(f"model saved to {model_path}")
@@ -567,7 +567,7 @@ if __name__ == "__main__":
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
                              iteration=args.num_iterations + 1, global_step=global_step,
-                             base=args.base, base_checkpoint=args.base_checkpoint), model_path)
+                             base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()

@@ -61,4 +61,4 @@ def make_residual(num_envs, env, checkpoint, base_checkpoint=None):
     residual.load_state_dict(ckpt["agent"])
     residual.eval()
     # ppo.py does not save --residual-scale; runs use the default
-    return DPPolicy(base, residual, Args.residual_scale, action_space)
+    return DPPolicy(base, residual, ckpt.get("residual_scale", Args.residual_scale), action_space)
