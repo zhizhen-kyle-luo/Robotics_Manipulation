@@ -87,9 +87,10 @@ class DiffusionBase:
 class ResidualWrapper(gym.vector.VectorWrapper):
     """ResiP residual: executes base action + scale * residual at every control step
 
-    the agent observes [env obs, base action for this step]; the frozen base sees the same env obs,
-    so a hole offset injected by the env reaches both. wraps a ManiSkillVectorEnv, whose auto-reset
-    returns the next episode's first obs for done envs, so the base is reset before it acts on them
+    the agent observes residual_input: the env obs normalized as the base normalizes it, then the base action
+    for this step; the frozen base sees the raw env obs, so a hole offset injected by the env reaches both.
+    wraps a ManiSkillVectorEnv, whose auto-reset returns the next episode's first obs for done envs, so the
+    base is reset before it acts on them
     """
 
     def __init__(self, env, base, scale):
@@ -112,11 +113,18 @@ class ResidualWrapper(gym.vector.VectorWrapper):
             mask = torch.ones(obs.shape[0], dtype=torch.bool, device=obs.device)
         self.base.reset(mask)
         self.base_action = self.base.act(obs)
-        return torch.cat([obs, self.base_action], -1), info
+        return residual_input(self.base, obs, self.base_action), info
 
     def step(self, actions):
         action = torch.clamp(self.base_action + self.scale * actions, self.action_low, self.action_high)
         obs, rew, terminations, truncations, infos = self.env.step(action)
         self.base.reset(terminations | truncations)
         self.base_action = self.base.act(obs)
-        return torch.cat([obs, self.base_action], -1), rew, terminations, truncations, infos
+        return residual_input(self.base, obs, self.base_action), rew, terminations, truncations, infos
+
+
+def residual_input(base, obs, base_action):
+    """ResiP's residual input (residual_ppo.py: next_nobs, base_naction): obs on the base's training scale, so a
+    few mm of hole error is not lost against metre-scale coordinates, then the base action, which is already in
+    the DP's (unnormalized, [-1, 1]) action space"""
+    return torch.cat([base.normalize(obs), base_action], -1)
