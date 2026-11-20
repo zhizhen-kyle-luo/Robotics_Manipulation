@@ -12,13 +12,15 @@ uv run pytest tests
 ## Residual PPO
 
 ```bash
-uv run python ppo.py --base dp                               # clean residual (4), ResiP's settings (METHOD_DEFAULTS in ppo.py)
+uv run python ppo.py --base dp                               # clean residual (4), ResiP's settings (the Args defaults in ppo.py)
 uv run python ppo.py --base dp --hole-offset-range 0 0.004   # noise-trained residual (4')
-uv run python ppo.py                                           # PPO from scratch (3), dense reward by default
 uv run python ppo.py <original flags> --checkpoint runs/<run>/ckpt_<i>.pt --exp-name <run>  # resume: repeat every original flag
 ```
 
-Local smoke run: add `--sim-backend physx_cpu --num-envs 1 --num-eval-envs 1 --num-minibatches 1 --no-capture-video`.
+Local smoke run: add `--sim-backend physx_cpu --num-envs 1 --num-eval-envs 1 --no-capture-video`.
+
+- `ppo.py --starts <file>` trains from saved start states (`start_pool.py`). Geometry is fixed per env slot at reconfigure, so a partial reset puts a slot back into its own state. With at least as many slots as states the pool is dealt evenly once; with fewer, every full reset (one per iteration) rebuilds all slots from a new batch.
+- `--max-episode-steps` defaults to 200, matching the Diffusion Policy evaluation, and evaluation runs for exactly one episode.
 
 If the tests fail on macOS with `ErrorIncompatibleDriver` or `failed to find a rendering device`, point SAPIEN at MoltenVK:
 `export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`
@@ -38,14 +40,6 @@ uv run python evaluate.py --policy my_module:make_policy --policy-kwargs '{"chec
 - `scripts/fetch_start_states.sh` puts Sut's 1000 train and 500 held-out states in `start_states/` (they are in `data_setup`'s history, not at its tip).
 - `data/interim_test.pt` holds 50 stand-in states for the tests, made by `scripts/make_interim_start_states.py`. Nothing reported uses them.
 
-## PPO from scratch (Kevin)
-
-- `ppo.py --starts <file>` trains from saved start states (`start_pool.py`). Geometry is fixed per env slot at reconfigure, so a partial reset puts a slot back into its own state. With at least as many slots as states the pool is dealt evenly once (1000 states in 2048 slots); with fewer, every `--starts-reshuffle-freq` iterations all slots are rebuilt from a new batch.
-- `--max-episode-steps` defaults to 200, matching the Diffusion Policy evaluation, and evaluation runs for exactly one episode.
-- `--logstd-init` and `--gripper-closed` are the settings `cluster/ppo_tune.sbatch` compares. The start states hold the peg on the table about 40 cm from the hole. From there an untrained policy (noise 0.61 on every action) has dropped the peg in every episode by step 50, reward per step 0.035 against 0.277 for holding still. With the gripper forced closed, 30% still hold it at step 200; with noise 0.22 as well, 100% do. PPO learns to keep the peg by itself in under 100k steps (one CPU env, training return 8 to about 59), so the gripper stays free unless the sweep says otherwise.
-- `ppo_policy.py` scores a checkpoint with `evaluate.py`: `--policy ppo_policy:make_policy --policy-kwargs '{"checkpoint": "runs/<run>/final_ckpt.pt"}'`.
-- `scripts/curves.py` prints runs side by side and writes the learning curves to CSV.
-
 Classical controller on Sut's 500 held-out states (CPU sim, 200 steps):
 
 | Hole offset | `success_once` (95% CI) | `success_at_end` | Mean steps to success |
@@ -55,10 +49,6 @@ Classical controller on Sut's 500 held-out states (CPU sim, 200 steps):
 | 4 mm | 0.976 [0.959, 0.986] | 0.950 | 44 |
 | 6 mm | 0.968 [0.949, 0.980] | 0.934 | 50 |
 
-## Colab
-
-`colab/ppo_colab.ipynb` runs the smoke test, the tuning runs, the 75M-step runs and the final evaluation on a Colab GPU ([open in Colab](https://colab.research.google.com/github/zhizhen-kyle-luo/Robotics_Manipulation/blob/kevin/ppo-start-states/colab/ppo_colab.ipynb)). Runs, logs and results go to Google Drive. `ppo_runs.py` resumes each run from its newest checkpoint after a disconnect and skips finished ones.
-
 ## Cluster (ORCD Engaging)
 
 ```bash
@@ -67,12 +57,9 @@ git clone git@github.com:zhizhen-kyle-luo/Robotics_Manipulation.git && cd Roboti
 git switch kevin/ppo-start-states
 bash cluster/setup_engaging.sh                  # once, on the login node: uv env, start states, Vulkan ICD
 sbatch cluster/smoke.sbatch                     # read logs/peg-smoke-<jobid>.out before training anything
-sbatch --array=1-4 cluster/ppo_tune.sbatch      # 15M steps over the two PPO settings in question
-python scripts/curves.py runs/ppo_tune_*        # after activating .venv: compare them
-PPO_FLAGS="<chosen flags>" sbatch --array=1-4 cluster/ppo_scratch.sbatch  # 75M steps: dense seeds 1-3, sparse seed 1
 ```
 
-Resubmitting `ppo_scratch.sbatch` with the same `PPO_FLAGS` resumes each run from its newest checkpoint. All jobs default to the `mit_normal_gpu` partition; use `sbatch -p <partition>` for a lab's own GPUs.
+The smoke job defaults to the `mit_normal_gpu` partition; use `sbatch -p <partition>` for a lab's own GPUs.
 
 What to read in the smoke log:
 - **Hold test.** `grasped` should be close to 1. The states were generated on CPU physics and training runs on GPU physics; if the grasps do not survive the transfer, stop and regenerate the states on the GPU.
