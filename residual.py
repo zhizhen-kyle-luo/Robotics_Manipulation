@@ -93,12 +93,14 @@ class ResidualWrapper(gym.vector.VectorWrapper):
     base is reset before it acts on them
     """
 
-    def __init__(self, env, base, scale):
+    def __init__(self, env, base, scale, residual_obs="state"):
         super().__init__(env)
         self.base, self.scale = base, scale
         obs_dim = env.single_observation_space.shape[0]
         act_dim = env.single_action_space.shape[0]
-        self.single_observation_space = gym.spaces.Box(-np.inf, np.inf, (obs_dim + act_dim,), np.float32)
+        self.residual_input = ResidualInput(base, residual_obs, env.base_env if residual_obs == "oracle" else None,
+                                            obs_dim, act_dim)
+        self.single_observation_space = gym.spaces.Box(-np.inf, np.inf, (self.residual_input.dim,), np.float32)
         self.action_low = torch.as_tensor(env.single_action_space.low, device=env.device)
         self.action_high = torch.as_tensor(env.single_action_space.high, device=env.device)
         self.base_action = None
@@ -116,18 +118,49 @@ class ResidualWrapper(gym.vector.VectorWrapper):
             mask = torch.ones(obs.shape[0], dtype=torch.bool, device=obs.device)
         self.base.reset(mask)
         self.base_action = self.base.act(obs)
-        return residual_input(self.base, obs, self.base_action), info
+        return self.residual_input(obs, self.base_action, mask), info
 
     def step(self, actions):
         action = torch.clamp(self.base_action + self.scale * actions, self.action_low, self.action_high)
         obs, rew, terminations, truncations, infos = self.env.step(action)
-        self.base.reset(terminations | truncations)
+        done = terminations | truncations
+        self.base.reset(done)
         self.base_action = self.base.act(obs)
-        return residual_input(self.base, obs, self.base_action), rew, terminations, truncations, infos
+        return self.residual_input(obs, self.base_action, done), rew, terminations, truncations, infos
 
 
-def residual_input(base, obs, base_action):
-    """ResiP's residual input (residual_ppo.py: next_nobs, base_naction): obs on the base's training scale, so a
-    few mm of hole error is not lost against metre-scale coordinates, then the base action, which is already in
-    the DP's (unnormalized, [-1, 1]) action space"""
-    return torch.cat([base.normalize(obs), base_action], -1)
+# box_hole_pose (p, then wxyz q) in PegInsertionSide's 43-dim state obs
+HOLE_POSE = slice(35, 42)
+HISTORY = 4
+
+
+class ResidualInput:
+    """Builds what the residual observes; shared by training (ResidualWrapper) and evaluation (dp_policy.py)
+
+    state: ResiP's input (residual_ppo.py: next_nobs, base_naction): obs on the base's training scale, so a few
+    mm of hole error is not lost against metre-scale coordinates, then the base action, which is already in the
+    DP's (unnormalized, [-1, 1]) action space
+    oracle: the same with the observed hole pose replaced by the true one, an upper bound on what knowing the
+    error is worth; the base still sees the wrong pose
+    history: the last HISTORY normalized obs (an episode's first obs repeated) in place of one, so the residual
+    can see what its recent motion did, which a single obs of a constant error cannot show
+    """
+
+    def __init__(self, base, mode, sim_env, obs_dim, act_dim):
+        assert mode in ("state", "oracle", "history"), mode
+        self.base, self.mode, self.sim_env = base, mode, sim_env
+        self.dim = obs_dim * (HISTORY if mode == "history" else 1) + act_dim
+        self.past = None
+
+    def __call__(self, obs, base_action, new_episode):
+        if self.mode == "oracle":
+            obs = obs.clone()
+            obs[:, HOLE_POSE] = self.sim_env.box_hole_pose.raw_pose
+        nobs = self.base.normalize(obs)
+        if self.mode == "history":
+            if self.past is None:
+                self.past = nobs[:, None].repeat(1, HISTORY, 1)
+            self.past = torch.cat([self.past[:, 1:], nobs[:, None]], 1)
+            self.past[new_episode] = nobs[new_episode, None]
+            nobs = self.past.flatten(1)
+        return torch.cat([nobs, base_action], -1)

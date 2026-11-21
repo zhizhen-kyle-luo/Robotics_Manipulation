@@ -15,6 +15,7 @@ uv run pytest tests
 uv run python ppo.py --base dp --starts start_states/train/states.pt   # clean residual (4), ResiP's settings (the Args defaults in ppo.py)
 uv run python ppo.py --base dp --starts start_states/train/states.pt \
     --hole-offset-range 0 0.006 --hole-rot-range-deg 0 1                # noise-trained residual (4'): 0-6 mm, 0-1 deg
+# diagnostics, added to the noise-trained command: --residual-obs oracle (sees the true hole) or history (last 4 obs)
 uv run python ppo.py <original flags> --checkpoint runs/<run>/ckpt_<i>.pt --exp-name <run>  # resume: repeat every original flag
 ```
 

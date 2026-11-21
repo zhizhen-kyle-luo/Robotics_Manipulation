@@ -52,3 +52,35 @@ def test_defaults_follow_resip():
     args = ppo.Args()
     assert (args.gamma, args.num_envs, args.num_minibatches, args.update_epochs) == (0.999, 1024, 1, 50)
     assert (args.vf_coef, args.max_grad_norm) == (1.0, 1.0)
+
+
+class IdentityBase:
+    def normalize(self, obs):
+        return obs
+
+
+def test_oracle_input_swaps_in_the_true_hole_pose_only():
+    from residual import HOLE_POSE, ResidualInput
+    true_pose = torch.arange(14.0).reshape(2, 7)
+    sim = SimpleNamespace(box_hole_pose=SimpleNamespace(raw_pose=true_pose))
+    obs, act = torch.randn(2, 43), torch.randn(2, 7)
+    out = ResidualInput(IdentityBase(), "oracle", sim, 43, 7)(obs, act, torch.ones(2, dtype=torch.bool))
+    want = obs.clone()
+    want[:, HOLE_POSE] = true_pose
+    assert torch.equal(out, torch.cat([want, act], -1)) and not torch.equal(obs[:, HOLE_POSE], true_pose)
+
+
+def test_history_input_stacks_past_obs_and_restarts_per_env():
+    from residual import HISTORY, ResidualInput
+    inp = ResidualInput(IdentityBase(), "history", None, 3, 2)
+    act, none = torch.zeros(2, 2), torch.zeros(2, dtype=torch.bool)
+    obs = [torch.full((2, 3), float(t)) for t in range(6)]
+    out = inp(obs[0], act, ~none)
+    assert out.shape == (2, inp.dim) and inp.dim == 3 * HISTORY + 2 and torch.equal(out[:, :-2], torch.zeros(2, 12))
+    for t in (1, 2):
+        out = inp(obs[t], act, none)
+    assert out[0, :-2].reshape(HISTORY, 3)[:, 0].tolist() == [0, 0, 1, 2]
+    # env 1 starts a new episode: its history is its first obs repeated, env 0 keeps sliding
+    out = inp(obs[3], act, torch.tensor([False, True]))
+    assert out[0, :-2].reshape(HISTORY, 3)[:, 0].tolist() == [0, 1, 2, 3]
+    assert out[1, :-2].reshape(HISTORY, 3)[:, 0].tolist() == [3, 3, 3, 3]

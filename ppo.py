@@ -63,6 +63,8 @@ class Args:
     base_checkpoint: str = "base_ckpts/dp_clean_s0.pt"
     """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
     residual_scale: float = 0.1
+    residual_obs: Literal["state", "oracle", "history"] = "state"
+    """what the residual observes (residual.py ResidualInput); oracle and history are diagnostics"""
     """residual action scale, from ResiP"""
     total_timesteps: int = 75_000_000
     """total timesteps of the experiments"""
@@ -264,7 +266,8 @@ if __name__ == "__main__":
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
     if args.starts is not None:
         envs = StartPoolWrapper(envs, args.starts, seed=args.seed)
-        eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1)
+        # one fixed draw of eval states, so best_ckpt.pt compares checkpoints on the same episodes
+        eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1, reshuffle=False)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
@@ -285,8 +288,8 @@ if __name__ == "__main__":
 
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs._env)
     # one frozen copy per vector env: each keeps its own envs' observation histories and action chunks
-    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale)
-    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale)
+    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale, args.residual_obs)
+    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale, args.residual_obs)
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -395,7 +398,7 @@ if __name__ == "__main__":
             best_eval_success = max(best_eval_success, eval_success)
             state = dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
                          iteration=iteration, global_step=global_step, best_eval_success=best_eval_success,
-                         base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale)
+                         base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs)
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             atomic_save(state, model_path)
             print(f"model saved to {model_path}")
@@ -567,7 +570,7 @@ if __name__ == "__main__":
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
                              iteration=args.num_iterations + 1, global_step=global_step, best_eval_success=best_eval_success,
-                             base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale), model_path)
+                             base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()

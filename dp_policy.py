@@ -15,7 +15,7 @@ import torch
 from mani_skill.utils import common
 
 from ppo import Args, ResidualAgent
-from residual import DiffusionBase, residual_input
+from residual import DiffusionBase, ResidualInput
 
 
 class DPPolicy:
@@ -24,15 +24,16 @@ class DPPolicy:
     composes the action as ResidualWrapper does during training, so evaluation runs the trained policy exactly
     """
 
-    def __init__(self, base, residual=None, scale=None, action_space=None):
-        self.base, self.residual, self.scale = base, residual, scale
+    def __init__(self, base, residual=None, residual_input=None, scale=None, action_space=None):
+        self.base, self.residual, self.residual_input, self.scale = base, residual, residual_input, scale
         if residual is not None:
             self.action_low = torch.as_tensor(action_space.low, device=base.device)
             self.action_high = torch.as_tensor(action_space.high, device=base.device)
 
     def reset(self):
         # evaluate.py starts every env on a new episode together
-        self.base.reset(torch.ones(self.base.n, dtype=torch.bool))
+        self.new_episode = torch.ones(self.base.n, dtype=torch.bool, device=self.base.device)
+        self.base.reset(self.new_episode)
 
     @torch.no_grad()
     def act(self, obs):
@@ -42,7 +43,8 @@ class DPPolicy:
         self.last_base_action = base_action
         if self.residual is None:
             return base_action
-        residual = self.residual.get_action(residual_input(self.base, obs, base_action), deterministic=True)
+        residual = self.residual.get_action(self.residual_input(obs, base_action, self.new_episode), deterministic=True)
+        self.new_episode = torch.zeros_like(self.new_episode)
         self.last_residual_action = self.scale * residual
         return torch.clamp(base_action + self.last_residual_action, self.action_low, self.action_high)
 
@@ -56,12 +58,12 @@ def make_residual(num_envs, env, checkpoint, base_checkpoint=None):
     ckpt = torch.load(checkpoint, map_location=device, weights_only=True)
     base = DiffusionBase(base_checkpoint or ckpt["base_checkpoint"], num_envs, device)
     action_space = env.unwrapped.single_action_space
+    residual_input = ResidualInput(base, ckpt.get("residual_obs", "state"), env.unwrapped, base.obs_dim, base.act_dim)
     # ResidualAgent only reads the residual's input and output sizes
     spaces = SimpleNamespace(
-        single_observation_space=gym.spaces.Box(-np.inf, np.inf, (base.obs_dim + base.act_dim,), np.float32),
+        single_observation_space=gym.spaces.Box(-np.inf, np.inf, (residual_input.dim,), np.float32),
         single_action_space=action_space)
     residual = ResidualAgent(spaces).to(device)
     residual.load_state_dict(ckpt["agent"])
     residual.eval()
-    # ppo.py does not save --residual-scale; runs use the default
-    return DPPolicy(base, residual, ckpt.get("residual_scale", Args.residual_scale), action_space)
+    return DPPolicy(base, residual, residual_input, ckpt.get("residual_scale", Args.residual_scale), action_space)
