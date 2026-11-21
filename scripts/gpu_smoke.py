@@ -50,7 +50,7 @@ def main():
     if args.starts is not None:
         hold_test(args.starts)
 
-    env = make_env(num_envs=args.num_envs, sim_backend="physx_cuda", obs_mode="state", hole_offset_range=(0.0, 0.004))
+    env = make_env(num_envs=args.num_envs, sim_backend="physx_cuda", obs_mode="state", hole_offset_range=(0.0, 0.006), hole_rot_range_deg=(0.0, 1.0))
     u = env.unwrapped
     obs, _ = env.reset(seed=0)
     print("obs", tuple(obs.shape), "action", env.action_space.shape, "device", obs.device)
