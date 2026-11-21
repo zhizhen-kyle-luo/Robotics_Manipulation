@@ -67,7 +67,7 @@ def test_full_reset_draws_a_new_batch():
 def test_pool_smaller_than_slots_is_dealt_evenly():
     # the real numbers: 1000 train states in 2048 slots, 500 eval states in 500 slots
     wrapper = StartPoolWrapper.__new__(StartPoolWrapper)
-    wrapper.rng = np.random.default_rng(0)
+    wrapper.rng, wrapper.reshuffle = np.random.default_rng(0), True
     wrapper.pool_size, wrapper.num_envs = 1000, 2048
     assert not wrapper.needs_reshuffle
     counts = np.bincount(wrapper._deal_slots(), minlength=1000)
@@ -75,6 +75,9 @@ def test_pool_smaller_than_slots_is_dealt_evenly():
     wrapper.pool_size, wrapper.num_envs = 500, 500
     assert not wrapper.needs_reshuffle
     assert sorted(wrapper._deal_slots().tolist()) == list(range(500))
+    # in-training eval: more states than slots, but one fixed draw
+    wrapper.pool_size, wrapper.reshuffle = 1000, False
+    assert not wrapper.needs_reshuffle and len(set(wrapper._deal_slots().tolist())) == 500
 
 
 def test_full_reset_does_not_rebuild_when_slots_cover_the_pool():
