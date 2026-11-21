@@ -1,7 +1,7 @@
 """Shared evaluation: run a policy from saved start states under the hole pose offset sweep.
 
     python evaluate.py --policy classical --starts data/test_states.pt \
-        --noise-mm 0 2 4 6 --num-envs 100 --out results/classical.json
+        --noise-mm 0 2 4 6 --rot-deg 1 --num-envs 100 --out results/classical.json --log-steps
 
 A policy is any object with
     reset()       called at the start of each batch of episodes
@@ -13,9 +13,14 @@ mani_skill.utils.common.flatten_state_dict(obs, use_torch=True) gives exactly th
 vector the learned policies were trained on.
 
 Each noise magnitude m shifts the observed hole pose by exactly m in the hole plane, in a direction
-drawn once per episode. Directions depend only on (start index, m, --seed), so every controller is
-scored on identical offsets. Success is reported both ways ManiSkill does: success_once (inserted at
-any step, the primary number) and success_at_end.
+drawn once per episode. --rot-deg r rotates the observed hole orientation by exactly r degrees about
+an axis drawn once per episode. Directions and axes depend only on (start index, magnitude, --seed),
+so every controller is scored on identical errors. Success is reported both ways ManiSkill does:
+success_once (inserted at any step, the primary number) and success_at_end.
+
+--log-steps also saves per-step traces to <out>_steps.npz, keyed "<noise_mm>mm/<field>" with shape
+(episodes, steps, ...). A policy may expose last_base_action, last_residual_action, phase or
+spiral_count (per env, set by act) to have them logged too.
 """
 
 import argparse
@@ -35,6 +40,8 @@ if platform.system() == "Darwin":
 import gymnasium as gym
 import numpy as np
 import torch
+from mani_skill.utils.geometry.rotation_conversions import quaternion_to_matrix
+from scipy.spatial.transform import Rotation as R
 
 import noisy_env  # noqa: F401  registers PegInsertionSideNoisy-v1
 import start_states
@@ -56,11 +63,41 @@ def sweep_offsets(n, magnitude, seed):
     return magnitude * np.stack([np.cos(theta), np.sin(theta)], axis=1)
 
 
+def sweep_rotations(n, degrees, seed):
+    """(n, 4) wxyz quaternions rotating by exactly `degrees` about seeded uniformly random 3D axes"""
+    axis = np.random.default_rng(seed).normal(size=(n, 3))
+    axis /= np.linalg.norm(axis, axis=1, keepdims=True)
+    return R.from_rotvec(np.deg2rad(degrees) * axis).as_quat(scalar_first=True)
+
+
 def set_hole_offsets(env, offsets):
     # resets into saved states skip _initialize_episode, so the sweep writes noisy_env's offsets directly
     u = env.unwrapped
     u.hole_offsets[:, 0] = 0
     u.hole_offsets[:, 1:] = torch.as_tensor(offsets, dtype=torch.float32, device=u.device)
+
+
+def set_hole_rotations(env, quats):
+    u = env.unwrapped
+    u.hole_rots[:] = torch.as_tensor(quats, dtype=torch.float32, device=u.device)
+
+
+def roll_error(u):
+    """peg roll about the true hole axis relative to the nearest quarter turn (square peg), in radians"""
+    rel = quaternion_to_matrix((u.box_hole_pose.inv() * u.peg.pose).q)
+    roll = torch.atan2(rel[:, 2, 1], rel[:, 1, 1])  # peg y axis seen in the hole y-z plane
+    return torch.remainder(roll + torch.pi / 4, torch.pi / 2) - torch.pi / 4
+
+
+def step_record(u, info, policy, action):
+    record = dict(head_in_hole=info["peg_head_pos_at_hole"], roll_error=roll_error(u),
+                  tcp_pose=u.agent.tcp.pose.raw_pose, is_grasped=u.agent.is_grasping(u.peg),
+                  contact_force=u.scene.get_pairwise_contact_forces(u.peg, u.box),
+                  success=info["success"], action=action)
+    for name in ("last_base_action", "last_residual_action", "phase", "spiral_count"):
+        if getattr(policy, name, None) is not None:
+            record[name] = getattr(policy, name)
+    return {k: v.cpu().numpy() if torch.is_tensor(v) else np.array(v) for k, v in record.items()}
 
 
 def wilson(k, n, z=1.96):
@@ -81,47 +118,65 @@ def build_policy(spec, num_envs, env, policy_kwargs):
     return getattr(importlib.import_module(module), name)(num_envs=num_envs, env=env, **policy_kwargs)
 
 
-def run_episodes(env, policy, starts, idx, offsets, max_steps):
+def run_episodes(env, policy, starts, idx, offsets, rotations, max_steps, log_steps=False):
     """Run one batch. idx may be shorter than num_envs; it is padded and the padding dropped."""
     u = env.unwrapped
     n_real = len(idx)
     pad = np.resize(idx, u.num_envs)
     start_states.reset_to(env, starts, pad)
     set_hole_offsets(env, np.resize(offsets, (u.num_envs, 2)))
+    set_hole_rotations(env, np.resize(rotations, (u.num_envs, 4)))
     obs = u.get_obs()
     policy.reset()
 
     first_success = torch.full((u.num_envs,), -1, dtype=torch.long)
     success = torch.zeros(u.num_envs, dtype=torch.bool)
+    steps = []
     for t in range(max_steps):
         action = policy.act(obs).to(u.device)
         obs, _, _, _, info = env.step(action)
         success = info["success"].cpu()
         first_success[(first_success < 0) & success] = t + 1
-    return dict(success_once=(first_success >= 0)[:n_real].numpy(),
-                success_at_end=success[:n_real].numpy(),
-                steps_to_success=first_success[:n_real].numpy())
+        if log_steps:
+            steps.append(step_record(u, info, policy, action))
+    out = dict(success_once=(first_success >= 0)[:n_real].numpy(),
+               success_at_end=success[:n_real].numpy(),
+               steps_to_success=first_success[:n_real].numpy(),
+               start_idx=np.asarray(idx),
+               offset_yz=u.hole_offsets[:n_real, 1:].cpu().numpy(),
+               rot_axis_angle=R.from_quat(u.hole_rots[:n_real].cpu().numpy(), scalar_first=True).as_rotvec())
+    # (episodes, steps, ...) per field
+    trace = {k: np.stack([s[k] for s in steps], 1)[:n_real] for k in steps[0]} if log_steps else {}
+    return out, trace
 
 
 def evaluate(policy_spec, starts_path, noise_mm, num_envs, sim_backend, max_steps, seed,
-             limit=None, policy_kwargs=None):
+             limit=None, policy_kwargs=None, rot_deg=0.0, steps_out=None):
     starts = start_states.load(starts_path)
     n = len(starts["seeds"]) if limit is None else min(limit, len(starts["seeds"]))
     env = make_env(num_envs=num_envs, sim_backend=sim_backend, max_episode_steps=max_steps + 1)
     policy = build_policy(policy_spec, num_envs, env, policy_kwargs or {})
 
     results = dict(policy=policy_spec, starts=str(starts_path), n=n, max_steps=max_steps,
-                   seed=seed, policy_kwargs=policy_kwargs or {}, sweep=[])
+                   seed=seed, rot_deg=rot_deg, policy_kwargs=policy_kwargs or {}, sweep=[])
+    traces = {}
+    # the trailing 1 keeps the axis stream apart from the offset directions of the same magnitude
+    rotations = sweep_rotations(len(starts["seeds"]), rot_deg, seed=[seed, int(round(rot_deg * 1000)), 1])[:n]
     for m in noise_mm:
         offsets = sweep_offsets(len(starts["seeds"]), m / 1000.0, seed=[seed, int(round(m * 1000))])[:n]
         t0 = time.time()
-        per_ep = {k: [] for k in ("success_once", "success_at_end", "steps_to_success")}
+        per_ep, per_step = {}, {}
         for b in range(0, n, num_envs):
             idx = np.arange(b, min(b + num_envs, n))
-            out = run_episodes(env, policy, starts, idx, offsets[idx], max_steps)
-            for k in per_ep:
-                per_ep[k].append(out[k])
+            out, trace = run_episodes(env, policy, starts, idx, offsets[idx], rotations[idx], max_steps,
+                                      log_steps=steps_out is not None)
+            for k, v in out.items():
+                per_ep.setdefault(k, []).append(v)
+            for k, v in trace.items():
+                per_step.setdefault(k, []).append(v)
         per_ep = {k: np.concatenate(v) for k, v in per_ep.items()}
+        per_ep["seed"] = np.full(n, seed)
+        traces.update({f"{m:g}mm/{k}": np.concatenate(v) for k, v in per_step.items()})
         k_once = int(per_ep["success_once"].sum())
         steps = per_ep["steps_to_success"][per_ep["success_once"]]
         row = dict(
@@ -139,6 +194,8 @@ def evaluate(policy_spec, starts_path, noise_mm, num_envs, sim_backend, max_step
               f"at_end {row['success_at_end']:.3f}  steps {row['mean_steps_to_success']}  "
               f"({row['wall_seconds']:.0f}s)", flush=True)
     env.close()
+    if steps_out is not None:
+        np.savez_compressed(steps_out, **traces)
     return results
 
 
@@ -150,17 +207,25 @@ def main():
     ap.add_argument("--num-envs", type=int, default=1)
     ap.add_argument("--sim-backend", default="auto")
     ap.add_argument("--max-steps", type=int, default=200, help="same for every method; 200 matches the Diffusion Policy evaluation")
-    ap.add_argument("--seed", type=int, default=0, help="seeds the offset directions")
+    ap.add_argument("--rot-deg", type=float, default=0.0, help="observed hole orientation error in degrees, same for every noise magnitude")
+    ap.add_argument("--seed", type=int, default=0, help="seeds the offset directions and rotation axes")
     ap.add_argument("--limit", type=int, default=None, help="evaluate only the first N start states")
     ap.add_argument("--policy-kwargs", default="{}", help="JSON dict passed to the policy factory")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--log-steps", action="store_true", help="also save per-step traces to <out>_steps.npz")
     args = ap.parse_args()
+    if args.log_steps and not args.out:
+        ap.error("--log-steps needs --out")
 
+    # absolute, since on macOS SAPIEN changes the working directory when the env is built
+    out = Path(args.out).resolve() if args.out else None
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
     results = evaluate(args.policy, args.starts, args.noise_mm, args.num_envs, args.sim_backend,
-                       args.max_steps, args.seed, args.limit, json.loads(args.policy_kwargs))
-    if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(json.dumps(results, indent=1))
+                       args.max_steps, args.seed, args.limit, json.loads(args.policy_kwargs), args.rot_deg,
+                       out.with_name(f"{out.stem}_steps.npz") if args.log_steps else None)
+    if out:
+        out.write_text(json.dumps(results, indent=1))
 
 
 if __name__ == "__main__":

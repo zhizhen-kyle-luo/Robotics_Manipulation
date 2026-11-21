@@ -12,8 +12,10 @@ uv run pytest tests
 ## Residual PPO
 
 ```bash
-uv run python ppo.py --base dp                               # clean residual (4), ResiP's settings (the Args defaults in ppo.py)
-uv run python ppo.py --base dp --hole-offset-range 0 0.004   # noise-trained residual (4')
+uv run python ppo.py --base dp --starts start_states/train/states.pt   # clean residual (4), ResiP's settings (the Args defaults in ppo.py)
+uv run python ppo.py --base dp --starts start_states/train/states.pt \
+    --hole-offset-range 0 0.006 --hole-rot-range-deg 0 1                # noise-trained residual (4'): 0-6 mm, 0-1 deg
+# diagnostics, added to the noise-trained command: --residual-obs oracle (sees the true hole) or history (last 4 obs)
 uv run python ppo.py <original flags> --checkpoint runs/<run>/ckpt_<i>.pt --exp-name <run>  # resume: repeat every original flag
 ```
 
@@ -21,6 +23,7 @@ Local smoke run: add `--sim-backend physx_cpu --num-envs 1 --num-eval-envs 1 --n
 
 - `ppo.py --starts <file>` trains from saved start states (`start_pool.py`). Geometry is fixed per env slot at reconfigure, so a partial reset puts a slot back into its own state. With at least as many slots as states the pool is dealt evenly once; with fewer, every full reset (one per iteration) rebuilds all slots from a new batch.
 - `--max-episode-steps` defaults to 200, matching the Diffusion Policy evaluation, and evaluation runs for exactly one episode.
+- The in-training evaluation runs on 500 envs (`--num-eval-envs`) with no hole pose error, on `--eval-starts`, which defaults to `--starts`. Keep it on the training states: the held-out `start_states/eval` states are scored only by `evaluate.py` at the end. `runs/<run>/best_ckpt.pt` is the checkpoint with the best in-training `success_once`, as ResiP keeps it; `final_ckpt.pt` is the last one.
 
 If the tests fail on macOS with `ErrorIncompatibleDriver` or `failed to find a rendering device`, point SAPIEN at MoltenVK:
 `export VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`
@@ -31,9 +34,10 @@ If the tests fail on macOS with `ErrorIncompatibleDriver` or `failed to find a r
 ```bash
 uv run python evaluate.py --policy classical --starts start_states/eval/states.pt --out results/classical.json
 uv run python evaluate.py --policy my_module:make_policy --policy-kwargs '{"checkpoint": "..."}' --starts start_states/eval/states.pt --num-envs 100
+uv run python evaluate.py --policy classical --starts start_states/eval/states.pt --rot-deg 1 --out results/classical_rot1.json --log-steps
 ```
 
-- `evaluate.py` runs each start state once per hole offset (default 0, 2, 4, 6 mm). It reports `success_once` (primary) and `success_at_end` with Wilson 95% intervals, plus per-episode results in the JSON. Offset directions are seeded per (start index, magnitude), so every method sees identical offsets. A policy needs `reset()` and `act(obs)`, where `obs` is the batched `state_dict`; `common.flatten_state_dict(obs, use_torch=True)` gives the exact 43-dim `obs_mode="state"` vector.
+- `evaluate.py` runs each start state once per hole offset (default 0, 2, 4, 6 mm). It reports `success_once` (primary) and `success_at_end` with Wilson 95% intervals, plus per-episode results in the JSON. Offset directions are seeded per (start index, magnitude, `--seed`), so every method sees identical offsets. `--rot-deg r` adds an r degree error to the observed hole orientation, about an axis seeded the same way. Each episode records `start_idx`, the realised `offset_yz`, `rot_axis_angle` and `seed`. `--log-steps` also writes per-step traces to `<out>_steps.npz`: peg head position in the true hole frame, roll error to the nearest quarter turn, TCP pose, `is_grasped`, peg-box contact force, success, the executed action, and the policy's `last_base_action`, `last_residual_action`, `phase` and `spiral_count` when it exposes them. A policy needs `reset()` and `act(obs)`, where `obs` is the batched `state_dict`; `common.flatten_state_dict(obs, use_torch=True)` gives the exact 43-dim `obs_mode="state"` vector.
 - `classical.py` is controller (1). It aligns the peg 2 cm in front of the observed hole, matching the square peg to the nearest quarter roll. It then pushes along the hole axis under the stiffness controller. On a stall at the rim (no progress for 4 steps) it spiral searches in the hole plane, pausing whenever the peg starts to drop. An integral term cancels gravity sag. Once the head is 5 mm past the success depth it stops pushing and holds, because servoing on against the walls walks the arm back and pulls the peg out. It is pure feedback on the observation, so the hole offset reaches it exactly as it reaches the learned methods.
 - `ClassicalBase` wraps it in `residual.py`'s base interface (`reset(mask)`, `act(flat_obs)`).
 - `start_states.py` loads start-state files: Sut's list of records from `generate_start_states.py`, or the dict that `save()` writes. The seed rebuilds the peg and hole geometry on reconfigure; `reset_to` checks that against the saved box height, which the task sets to the peg half length.

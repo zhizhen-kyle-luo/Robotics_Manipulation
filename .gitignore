@@ -5,3 +5,15 @@ __pycache__/
 runs/
 results/
 logs/
+*.png
+*.jpg
+*.mp4
+*.ipynb
+.claude/
+docs/fix_plan.md
+docs/run_playbook.md
+base_ckpts/
+data/dp_training/
+wandb/
+*.log
+diffusion_policy/runs/

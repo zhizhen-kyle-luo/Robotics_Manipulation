@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# clean DP:            ./launch_dp.sh
+# noise-augmented DP:  TAG=noise ./launch_dp.sh --hole-noise
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -7,10 +9,9 @@ cd "$(dirname "$0")"
 PYTHON=${PYTHON:-$(cd .. && pwd)/.venv/bin/python}
 DATA=${DATA:-$HOME/Robotics_Manipulation/data/dp_training}
 SEEDS=${SEEDS:-"0 1 2"}
+TAG=${TAG:-clean}
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 DEMO_PATH=$DATA/trajectory.state.pd_ee_delta_pose.physx_cpu.h5
-# always train on every trajectory in the demo file
-NUM_DEMOS=$("$PYTHON" -c 'import h5py, sys; print(sum(k.startswith("traj_") for k in h5py.File(sys.argv[1], "r")))' "$DEMO_PATH")
 
 if [[ -n "$(git status --porcelain -- .)" ]]; then
   echo "diffusion_policy/ has uncommitted changes; commit first so runs map to an exact code version" >&2
@@ -20,18 +21,19 @@ fi
 mkdir -p runs/logs
 i=0
 for seed in $SEEDS; do
-  exp=dp_full${NUM_DEMOS}_s${seed}
-  session=dp${NUM_DEMOS}_s${seed}
+  exp=dp_${TAG}_s${seed}
+  session=$exp
   if tmux has-session -t "$session" 2>/dev/null; then
     echo "tmux session $session already exists, skipping seed $seed" >&2
     i=$((i + 1)); continue
   fi
   resume_args=""
   if [[ -n "${RESUME:-}" ]]; then resume_args="--resume $(printf %q "$RESUME")"; fi
+  # no --num-demos: train.py loads every successful demo, one per seed
   cmd="CUDA_VISIBLE_DEVICES=$((i % NUM_GPUS)) $PYTHON train.py --env-id PegInsertionSide-v1 \
     --demo-path $DEMO_PATH \
     --control-mode pd_ee_delta_pose --sim-backend physx_cpu \
-    --num-demos $NUM_DEMOS --max_episode_steps 300 --total_iters 100000 \
+    --max_episode_steps 300 --total_iters 100000 \
     --num_eval_envs 8 --save_freq 5000 \
     --norm-stats-path $DATA/norm_stats.json \
     --seed $seed --exp-name $exp \

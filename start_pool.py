@@ -20,12 +20,13 @@ import start_states
 class StartPoolWrapper(gym.Wrapper):
     """Wraps the raw ManiSkill env (below ManiSkillVectorEnv) so every reset lands in a saved start state."""
 
-    def __init__(self, env, starts_path, seed=0):
+    def __init__(self, env, starts_path, seed=0, reshuffle=True):
         super().__init__(env)
         self.starts = start_states.load(starts_path)
         self.pool_size = len(self.starts["seeds"])
         self.num_envs = env.unwrapped.num_envs
         self.rng = np.random.default_rng(seed)
+        self.reshuffle = reshuffle
         # only our full reset may reconfigure; an automatic one would draw new geometry under a slot's saved state
         env.unwrapped.reconfiguration_freq = 0
         # pool index each slot was built for; set on the first full reset
@@ -33,10 +34,10 @@ class StartPoolWrapper(gym.Wrapper):
 
     @property
     def needs_reshuffle(self):
-        return self.pool_size > self.num_envs
+        return self.reshuffle and self.pool_size > self.num_envs
 
     def _deal_slots(self):
-        if self.needs_reshuffle:
+        if self.pool_size > self.num_envs:
             return self.rng.choice(self.pool_size, self.num_envs, replace=False)
         # repeat one shuffled pass of the pool until every slot has a state; counts differ by at most one
         return np.resize(self.rng.permutation(self.pool_size), self.num_envs)

@@ -55,12 +55,16 @@ class Args:
     sim_backend: str = "physx_cuda"
     """physx_cuda for training, physx_cpu (num_envs 1) for local smoke tests"""
     hole_offset_range: tuple[float, float] = (0.0, 0.0)
-    """observed hole offset magnitude range in metres; (0, 0.004) for the noise-trained residual"""
+    """training envs' observed hole offset magnitude range in metres; (0, 0.006) for the noise-trained residual"""
+    hole_rot_range_deg: tuple[float, float] = (0.0, 0.0)
+    """training envs' observed hole rotation error range in degrees; (0, 1) for the noise-trained residual"""
     base: Literal["dp"] = "dp"
     """frozen base policy for residual RL: dp is the Diffusion Policy in --base-checkpoint"""
-    base_checkpoint: str = "base_ckpts/dp_seed1.pt"
+    base_checkpoint: str = "base_ckpts/dp_clean_s0.pt"
     """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
     residual_scale: float = 0.1
+    residual_obs: Literal["state", "oracle", "history"] = "state"
+    """what the residual observes (residual.py ResidualInput); oracle and history are diagnostics"""
     """residual action scale, from ResiP"""
     total_timesteps: int = 75_000_000
     """total timesteps of the experiments"""
@@ -70,8 +74,8 @@ class Args:
     """the critic's learning rate, from ResiP"""
     num_envs: int = 1024
     """the number of parallel environments"""
-    num_eval_envs: int = 16
-    """the number of parallel evaluation environments"""
+    num_eval_envs: int = 500
+    """the number of parallel evaluation environments; the in-training eval is always clean (no hole pose error)"""
     partial_reset: bool = True
     """whether to let parallel environments reset upon termination instead of truncation"""
     eval_partial_reset: bool = False
@@ -120,7 +124,8 @@ class Args:
     starts: Optional[str] = None
     """saved grasped start states to train from (start_states.py format); None resets into the full task"""
     eval_starts: Optional[str] = None
-    """saved start states for the in-training evaluation; defaults to --starts"""
+    """saved start states for the in-training evaluation, which picks best_ckpt.pt; defaults to --starts.
+    keep it on training states: the held-out states are scored only by evaluate.py at the end"""
 
 
     # to be filled in runtime
@@ -253,14 +258,16 @@ if __name__ == "__main__":
 
     # env setup
     env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend=args.sim_backend, reward_mode="sparse",
-                      hole_offset_range=args.hole_offset_range, max_episode_steps=args.max_episode_steps)
+                      max_episode_steps=args.max_episode_steps)
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
-    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
+    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq,
+                    hole_offset_range=args.hole_offset_range, hole_rot_range_deg=args.hole_rot_range_deg, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
     if args.starts is not None:
         envs = StartPoolWrapper(envs, args.starts, seed=args.seed)
-        eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1)
+        # one fixed draw of eval states, so best_ckpt.pt compares checkpoints on the same episodes
+        eval_envs = StartPoolWrapper(eval_envs, args.eval_starts or args.starts, seed=args.seed + 1, reshuffle=False)
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
@@ -281,8 +288,8 @@ if __name__ == "__main__":
 
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs._env)
     # one frozen copy per vector env: each keeps its own envs' observation histories and action chunks
-    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale)
-    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale)
+    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale, args.residual_obs)
+    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale, args.residual_obs)
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -335,6 +342,7 @@ if __name__ == "__main__":
     print(f"####")
 
     start_iteration = 1
+    best_eval_success = -1.0
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
         agent.load_state_dict(ckpt["agent"])
@@ -345,6 +353,7 @@ if __name__ == "__main__":
             # resume after a cluster time limit: continue the step count so learning curves stay aligned
             optimizer.load_state_dict(ckpt["optimizer"])
             start_iteration, global_step = ckpt["iteration"], ckpt["global_step"]
+            best_eval_success = ckpt.get("best_eval_success", -1.0)
             # fresh seeds so a resumed run does not replay the first iterations' starts and noise
             # spaced so different training seeds never share a resume seed
             resume_seed = args.seed + 10_000 * start_iteration
@@ -361,7 +370,7 @@ if __name__ == "__main__":
         if iteration > start_iteration:
             next_obs, _ = envs.reset()
             next_done = torch.zeros(args.num_envs, device=device)
-        if iteration % args.eval_freq == 1:
+        if (iteration - 1) % args.eval_freq == 0:
             print("Evaluating")
             eval_obs, _ = eval_envs.reset()
             eval_metrics = defaultdict(list)
@@ -382,12 +391,20 @@ if __name__ == "__main__":
                 print(f"eval_{k}_mean={mean}")
             if args.evaluate:
                 break
-        if args.save_model and iteration % args.eval_freq == 1:
+        if args.save_model and (iteration - 1) % args.eval_freq == 0:
+            # ResiP keeps the checkpoint with the best in-training eval success (residual_ppo.py:428)
+            eval_success = torch.stack(eval_metrics["success_once"]).float().mean().item()
+            is_best = eval_success > best_eval_success
+            best_eval_success = max(best_eval_success, eval_success)
+            state = dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
+                         iteration=iteration, global_step=global_step, best_eval_success=best_eval_success,
+                         base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs)
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
-            atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=iteration, global_step=global_step,
-                             base=args.base, base_checkpoint=args.base_checkpoint), model_path)
+            atomic_save(state, model_path)
             print(f"model saved to {model_path}")
+            if is_best:
+                atomic_save(state, f"runs/{run_name}/best_ckpt.pt")
+                print(f"best model saved with eval success_once={eval_success}")
         # ResiP's cosine schedules; computed from the iteration so a resumed run needs no scheduler state
         for group, lr, warmup in zip(optimizer.param_groups, (args.learning_rate, args.critic_learning_rate),
                                      (RESIP_ACTOR_WARMUP_ITERATIONS, 0)):
@@ -552,8 +569,8 @@ if __name__ == "__main__":
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
-                             iteration=args.num_iterations + 1, global_step=global_step,
-                             base=args.base, base_checkpoint=args.base_checkpoint), model_path)
+                             iteration=args.num_iterations + 1, global_step=global_step, best_eval_success=best_eval_success,
+                             base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()

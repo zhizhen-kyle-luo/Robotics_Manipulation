@@ -1,9 +1,12 @@
+import json
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from gymnasium import spaces
 from h5py import Dataset, File, Group
+from mani_skill.utils.geometry.rotation_conversions import quaternion_apply, quaternion_multiply
 from torch.utils.data.sampler import Sampler
 
 
@@ -81,13 +84,32 @@ def load_hdf5(
     return ret
 
 
+def clean_traj_keys(json_path):
+    """h5 keys of the successful demos, one per seed
+
+    the planner's demo file repeats seeds (byte-identical actions) and keeps failed attempts, so training on it
+    as is double counts some scenes and imitates failures. episodes are kept in episode_id order, so the first
+    successful demo of each seed survives
+    """
+    with open(json_path) as f:
+        episodes = sorted(json.load(f)["episodes"], key=lambda e: e["episode_id"])
+    keys, seeds = [], set()
+    for e in episodes:
+        if e["success"] and e["episode_seed"] not in seeds:
+            seeds.add(e["episode_seed"])
+            keys.append(f"traj_{e['episode_id']}")
+    num_failed = sum(not e["success"] for e in episodes)
+    print(f"Kept {len(keys)} of {len(episodes)} demos: dropped {num_failed} failed and "
+          f"{len(episodes) - num_failed - len(keys)} repeated seeds")
+    return keys
+
+
 def load_traj_hdf5(path, num_traj=None):
     print("Loading HDF5 file", path)
     file = File(path, "r")
-    keys = list(file.keys())
+    keys = clean_traj_keys(path[:-len(".h5")] + ".json")
     if num_traj is not None:
         assert num_traj <= len(keys), f"num_traj: {num_traj} > len(keys): {len(keys)}"
-        keys = sorted(keys, key=lambda x: int(x.split("_")[-1]))
         keys = keys[:num_traj]
     ret = {key: load_content_from_h5_file(file[key]) for key in keys}
     file.close()
@@ -102,10 +124,10 @@ def load_demo_dataset(
     raw_data = load_traj_hdf5(path, num_traj)
     # raw_data has keys like: ['traj_0', 'traj_1', ...]
     # raw_data['traj_0'] has keys like: ['actions', 'dones', 'env_states', 'infos', ...]
-    _traj = raw_data["traj_0"]
+    _traj = next(iter(raw_data.values()))  # traj_0 may have been filtered out
     for key in keys:
         source_key = TARGET_KEY_TO_SOURCE_KEY[key]
-        assert source_key in _traj, f"key: {source_key} not in traj_0: {_traj.keys()}"
+        assert source_key in _traj, f"key: {source_key} not in the first traj: {_traj.keys()}"
     dataset = {}
     for target_key in keys:
         # if 'next' in target_key:
@@ -115,13 +137,13 @@ def load_demo_dataset(
         if isinstance(dataset[target_key][0], np.ndarray) and concat:
             if target_key in ["observations", "states"] and len(
                 dataset[target_key][0]
-            ) > len(raw_data["traj_0"]["actions"]):
+            ) > len(_traj["actions"]):
                 dataset[target_key] = np.concatenate(
                     [t[:-1] for t in dataset[target_key]], axis=0
                 )
             elif target_key in ["next_observations", "next_states"] and len(
                 dataset[target_key][0]
-            ) > len(raw_data["traj_0"]["actions"]):
+            ) > len(_traj["actions"]):
                 dataset[target_key] = np.concatenate(
                     [t[1:] for t in dataset[target_key]], axis=0
                 )
@@ -137,6 +159,34 @@ def load_demo_dataset(
                 type(dataset[target_key][0]),
             )
     return dataset
+
+
+# box_hole_pose (p, then wxyz q) in PegInsertionSide's 43-dim state obs, after qpos 9, qvel 9, tcp_pose 7,
+# peg_pose 7 and peg_half_size 3
+HOLE_POSE = slice(35, 42)
+
+
+def sample_hole_noise(n, device):
+    """n hole-frame pose errors, (n, 7) as p then wxyz q
+
+    the error model of the noisy evaluation: a shift uniform in [0, 6 mm] along a random direction in the hole's
+    y-z plane (x is the insertion axis) and a rotation uniform in [0, 1 deg] about a uniformly random 3D axis
+    """
+    shift = torch.rand(n, device=device) * 0.006
+    direction = torch.rand(n, device=device) * 2 * torch.pi
+    p = torch.stack([torch.zeros_like(shift), shift * torch.cos(direction), shift * torch.sin(direction)], -1)
+    angle = torch.rand(n, device=device) * np.deg2rad(1.0)
+    axis = F.normalize(torch.randn(n, 3, device=device), dim=-1)
+    q = torch.cat([torch.cos(angle / 2)[:, None], torch.sin(angle / 2)[:, None] * axis], -1)
+    return torch.cat([p, q], -1)
+
+
+def perturb_hole_pose(obs, noise):
+    """obs (..., 43) whose observed hole pose is hole_pose * noise, the hole-frame composition noisy_env uses"""
+    hole_p, hole_q = obs[..., HOLE_POSE][..., :3], obs[..., HOLE_POSE][..., 3:]
+    p = hole_p + quaternion_apply(hole_q, noise[..., :3].expand_as(hole_p))
+    q = quaternion_multiply(hole_q, noise[..., 3:].expand_as(hole_q))
+    return torch.cat([obs[..., :HOLE_POSE.start], p, q, obs[..., HOLE_POSE.stop:]], -1)
 
 
 def convert_obs(obs, concat_fn, transpose_fn, state_obs_extractor, depth = True):
