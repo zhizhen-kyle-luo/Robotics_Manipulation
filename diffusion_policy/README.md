@@ -99,36 +99,6 @@ RESUME=runs/dp_clean_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
 
 All options: `../.venv/bin/python train.py --help`
 
-### One run with images: `train_rgbd.py`
-
-Same algorithm with camera images (RGB and/or depth, 128x128) plus the robot state as input. It needs demos
-replayed with image observations (`trajectory.rgb.*.h5` or `trajectory.rgbd.*.h5`); the state demos in
-`../data/dp_training` do not work. Make them from the raw ManiSkill demos with:
-
-```bash
-../.venv/bin/python -m mani_skill.trajectory.replay_trajectory --traj-path <raw demo>.h5 \
-  -c pd_ee_delta_pose -o rgb -b physx_cpu --save-traj
-```
-
-```bash
-../.venv/bin/python train_rgbd.py --env-id PegInsertionSide-v1 \
-  --demo-path <path>/trajectory.rgb.pd_ee_delta_pose.physx_cpu.h5 \
-  --control-mode pd_ee_delta_pose --sim-backend physx_cpu --obs-mode rgb \
-  --num-demos 1000 --max_episode_steps 300 --total_iters 100000 \
-  --num_eval_envs 8 --save_freq 5000 \
-  --seed 0 --exp-name dp_rgb1000_s0
-```
-
-Options are the same as `train.py`, except:
-
-| option | default | meaning |
-|---|---|---|
-| `--obs-mode` | `rgb+depth` | `rgb`, `depth` or `rgb+depth`; must match the demo file |
-| `--batch_size` | `256` | |
-| `--norm-stats-path`, `--resume` | not available | only added to `train.py` |
-
-`launch_dp.sh` only runs `train.py`. All options: `../.venv/bin/python train_rgbd.py --help`
-
 ### Export for the residual and `evaluate.py`
 
 Run from the repo root. The export keeps the EMA weights and normalization stats and adds the config
@@ -145,68 +115,7 @@ uv run python evaluate.py --policy dp_policy:make_residual --policy-kwargs '{"ch
   --starts start_states/eval/states.pt --num-envs 100 --out results/residual_<run>.json
 ```
 
-## 3. Evaluation from grasped start states: `eval_start_states.py`
-
-```bash
-../.venv/bin/python eval_start_states.py --run runs/dp_full1000_s0
-```
-
-```bash
-# all seeds
-for s in 0 1 2; do ../.venv/bin/python eval_start_states.py --run runs/dp_full1000_s$s; done
-# full-task sanity check from normal resets
-../.venv/bin/python eval_start_states.py --run runs/dp_full1000_s0 --full-task 50 --max-episode-steps 300
-# videos (run the evaluation first, episodes are picked from its csv)
-../.venv/bin/python eval_start_states.py --run runs/dp_full1000_s0 --num-videos 10
-```
-
-| option | default | meaning |
-|---|---|---|
-| `--run` | required | run folder, e.g. `runs/dp_full1000_s0` |
-| `--ckpt` | `final.pt` | checkpoint in `<run>/checkpoints/` (EMA weights are used) |
-| `--start-states` | `../start_states/eval/states.pt` | start-state file |
-| `--num-states` | all | evaluate only the first N states |
-| `--full-task` | off | run N normal resets instead of start states |
-| `--full-task-seed-base` | `2000000` | seeds for `--full-task` |
-| `--max-episode-steps` | `200` | episode length (use `300` with `--full-task`) |
-| `--hole-offset-mm` | `0` | shift the observed hole position by this many mm in a random direction |
-| `--settle-steps` | `0` | idle steps after restoring a state, before the policy acts |
-| `--num-envs` | `50` | envs run in parallel |
-| `--num-videos` | `0` | record N episodes (half successes, half failures) |
-| `--seed` | `0` | policy noise and hole-offset directions |
-| `--out-dir` | `../results/dp_eval` | output folder |
-
-Output in `--out-dir`: `<name>.csv` (one row per episode), `<name>_summary.json` (success rates with 95% Wilson
-intervals), `videos/<name>/`. `<name>` is the run name, plus `__<ckpt>` if not `final.pt`, `__fulltask`, and
-`__hole<mm>mm`.
-
-## 4. Failure modes: `failure_modes.py`
-
-```bash
-../.venv/bin/python failure_modes.py --run runs/dp_full1000_s0
-```
-
-Takes the same `--run`, `--ckpt`, `--start-states`, `--num-states`, `--max-episode-steps`, `--hole-offset-mm`,
-`--settle-steps`, `--num-envs`, `--seed` and `--out-dir` options as `eval_start_states.py`.
-
-Output in `--out-dir`: `<name>__failmodes.csv` (a `failure_mode` per state) and `<name>__failmodes_summary.json`
-(counts per mode). Modes: `misaligned`, `jammed`, `entered_too_shallow`, `never_reached_face`, `dropped`.
-
-## 5. Plots: `plot_dp_eval.py`
-
-```bash
-../.venv/bin/python plot_dp_eval.py --runs dp_full1000_s0 dp_full1000_s1 dp_full1000_s2
-```
-
-| option | default | meaning |
-|---|---|---|
-| `--runs` | `dp_full136_s0 s1 s2` | result names (csv files) in `--out-dir` |
-| `--out-dir` | `../results/dp_eval` | folder with the csvs; PNGs are written here |
-| `--metric` | `success_once` | or `success_at_end` |
-
-Writes `success_rates.png`, `grasped_vs_fulltask.png` (if `__fulltask` csvs exist) and `steps_to_success.png`.
-
-## 6. Normalization tests: `test_normalization.py`
+## 3. Normalization tests: `test_normalization.py`
 
 ```bash
 ../.venv/bin/python test_normalization.py
