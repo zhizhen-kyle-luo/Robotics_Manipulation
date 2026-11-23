@@ -1,4 +1,5 @@
 from collections import defaultdict
+import json
 import math
 import os
 import random
@@ -24,7 +25,7 @@ from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 
 import noisy_env  # registers PegInsertionSideNoisy-v1
 from start_pool import StartPoolWrapper
-from residual import DiffusionBase, ResidualWrapper
+from residual import DiffusionBase, ObsNormalizer, ResidualWrapper
 
 @dataclass
 class Args:
@@ -63,6 +64,8 @@ class Args:
     base_checkpoint: str = "base_ckpts/dp_clean_s0.pt"
     """frozen Diffusion Policy for --base dp, exported with scripts/export_dp_base.py"""
     residual_scale: float = 0.1
+    obs_norm_stats: Optional[str] = None
+    """compute_norm.py's norm_stats.json; required, the residual's obs are z-scored with it (residual.py ObsNormalizer)"""
     residual_obs: Literal["state", "oracle", "history"] = "state"
     """what the residual observes (residual.py ResidualInput); oracle and history are diagnostics"""
     """residual action scale, from ResiP"""
@@ -288,8 +291,12 @@ if __name__ == "__main__":
 
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs._env)
     # one frozen copy per vector env: each keeps its own envs' observation histories and action chunks
-    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale, args.residual_obs)
-    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale, args.residual_obs)
+    if args.obs_norm_stats is None:
+        raise ValueError("pass --obs-norm-stats <norm_stats.json from diffusion_policy/compute_norm.py>")
+    with open(args.obs_norm_stats) as f:
+        obs_norm = ObsNormalizer(json.load(f)["norm_stats"]["state"], device)
+    envs = ResidualWrapper(envs, DiffusionBase(args.base_checkpoint, envs.num_envs, device), args.residual_scale, obs_norm, args.residual_obs)
+    eval_envs = ResidualWrapper(eval_envs, DiffusionBase(args.base_checkpoint, eval_envs.num_envs, device), args.residual_scale, obs_norm, args.residual_obs)
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -398,7 +405,7 @@ if __name__ == "__main__":
             best_eval_success = max(best_eval_success, eval_success)
             state = dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
                          iteration=iteration, global_step=global_step, best_eval_success=best_eval_success,
-                         base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs)
+                         base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs, obs_norm=obs_norm.stats)
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             atomic_save(state, model_path)
             print(f"model saved to {model_path}")
@@ -570,7 +577,7 @@ if __name__ == "__main__":
             model_path = f"runs/{run_name}/final_ckpt.pt"
             atomic_save(dict(agent=agent.state_dict(), optimizer=optimizer.state_dict(),
                              iteration=args.num_iterations + 1, global_step=global_step, best_eval_success=best_eval_success,
-                             base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs), model_path)
+                             base=args.base, base_checkpoint=args.base_checkpoint, residual_scale=args.residual_scale, residual_obs=args.residual_obs, obs_norm=obs_norm.stats), model_path)
             print(f"model saved to {model_path}")
         logger.close()
     envs.close()

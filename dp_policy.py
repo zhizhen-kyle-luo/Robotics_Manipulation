@@ -15,7 +15,7 @@ import torch
 from mani_skill.utils import common
 
 from ppo import Args, ResidualAgent
-from residual import DiffusionBase, ResidualInput
+from residual import DiffusionBase, ObsNormalizer, ResidualInput
 
 
 class DPPolicy:
@@ -58,7 +58,8 @@ def make_residual(num_envs, env, checkpoint, base_checkpoint=None):
     ckpt = torch.load(checkpoint, map_location=device, weights_only=True)
     base = DiffusionBase(base_checkpoint or ckpt["base_checkpoint"], num_envs, device)
     action_space = env.unwrapped.single_action_space
-    residual_input = ResidualInput(base, ckpt.get("residual_obs", "state"), env.unwrapped, base.obs_dim, base.act_dim)
+    residual_input = ResidualInput(ObsNormalizer(ckpt["obs_norm"], device), ckpt.get("residual_obs", "state"),
+                                   env.unwrapped, base.obs_dim, base.act_dim)
     # ResidualAgent only reads the residual's input and output sizes
     spaces = SimpleNamespace(
         single_observation_space=gym.spaces.Box(-np.inf, np.inf, (residual_input.dim,), np.float32),

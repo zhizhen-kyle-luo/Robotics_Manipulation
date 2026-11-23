@@ -20,9 +20,6 @@ class StubBase:
     def act(self, obs):
         return torch.zeros((obs.shape[0], self.act_dim), device=obs.device)
 
-    def normalize(self, obs):
-        return obs
-
 
 def make_env(hole_offset_range, hole_rot_range_deg=(0.0, 0.0)):
     env = gym.make("PegInsertionSideNoisy-v1", obs_mode="state", control_mode="pd_ee_delta_pose",
@@ -82,7 +79,7 @@ def test_zero_residual_reproduces_base():
     residual_env = make_env((0.002, 0.002))
     act_dim = base_only.single_action_space.shape[0]
     base = StubBase(act_dim)
-    wrapped = ResidualWrapper(residual_env, StubBase(act_dim), 0.1)
+    wrapped = ResidualWrapper(residual_env, StubBase(act_dim), 0.1, lambda obs: obs)
     obs, _ = base_only.reset(seed=0)
     wrapped_obs, _ = wrapped.reset(seed=0)
     for _ in range(20):
@@ -97,7 +94,7 @@ def test_zero_residual_reproduces_base():
 def test_residual_is_scaled_then_clamped():
     env = make_env((0.0, 0.0))
     act_dim = env.single_action_space.shape[0]
-    wrapped = ResidualWrapper(env, StubBase(act_dim), 0.1)
+    wrapped = ResidualWrapper(env, StubBase(act_dim), 0.1, lambda obs: obs)
     wrapped.reset(seed=0)
     sent = []
     inner_step = env.step
@@ -127,7 +124,7 @@ def test_base_resets_before_acting_on_next_episode():
     env = make_env((0.0, 0.0))
     act_dim = env.single_action_space.shape[0]
     base = RecordingBase(act_dim)
-    wrapped = ResidualWrapper(env, base, 0.1)
+    wrapped = ResidualWrapper(env, base, 0.1, lambda obs: obs)
     wrapped.reset(seed=0)
     for _ in range(250):
         base.events.clear()

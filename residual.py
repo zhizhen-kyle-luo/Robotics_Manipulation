@@ -87,18 +87,18 @@ class DiffusionBase:
 class ResidualWrapper(gym.vector.VectorWrapper):
     """ResiP residual: executes base action + scale * residual at every control step
 
-    the agent observes residual_input: the env obs normalized as the base normalizes it, then the base action
+    the agent observes residual_input: the env obs normalized by normalize (an ObsNormalizer), then the base action
     for this step; the frozen base sees the raw env obs, so a hole offset injected by the env reaches both.
     wraps a ManiSkillVectorEnv, whose auto-reset returns the next episode's first obs for done envs, so the
     base is reset before it acts on them
     """
 
-    def __init__(self, env, base, scale, residual_obs="state"):
+    def __init__(self, env, base, scale, normalize, residual_obs="state"):
         super().__init__(env)
         self.base, self.scale = base, scale
         obs_dim = env.single_observation_space.shape[0]
         act_dim = env.single_action_space.shape[0]
-        self.residual_input = ResidualInput(base, residual_obs, env.base_env if residual_obs == "oracle" else None,
+        self.residual_input = ResidualInput(normalize, residual_obs, env.base_env if residual_obs == "oracle" else None,
                                             obs_dim, act_dim)
         self.single_observation_space = gym.spaces.Box(-np.inf, np.inf, (self.residual_input.dim,), np.float32)
         self.action_low = torch.as_tensor(env.single_action_space.low, device=env.device)
@@ -134,21 +134,43 @@ HOLE_POSE = slice(35, 42)
 HISTORY = 4
 
 
+OBS_CLIP = 5.0
+
+
+class ObsNormalizer:
+    """Z-scores the residual's obs with the demo stats (compute_norm.py) and clips them to +-OBS_CLIP
+
+    the DP runs on raw obs, as ManiSkill's baseline does: joint velocities are near zero in the planner's demos,
+    so z-scores of a policy's own motion reach the hundreds, and a DP trained on them fell to about 5 percent
+    success against about 60 raw. the residual still needs obs on one scale, or a few mm of hole error is lost
+    against metre-scale coordinates (ResiP feeds it normalized obs), and the clip bounds those velocities.
+    ResiP's own min-max scaling is not used: a 1 deg hole rotation maps to about 1e5 on quaternion components
+    that are constant in the demos
+    """
+
+    def __init__(self, stats, device):
+        self.stats = dict(mean=list(stats["mean"]), std=list(stats["std"]))  # saved in ppo.py checkpoints
+        self.mean = torch.tensor(self.stats["mean"], dtype=torch.float32, device=device)
+        self.std = torch.tensor(self.stats["std"], dtype=torch.float32, device=device)
+
+    def __call__(self, obs):
+        return torch.clamp((obs - self.mean) / self.std, -OBS_CLIP, OBS_CLIP)
+
+
 class ResidualInput:
     """Builds what the residual observes; shared by training (ResidualWrapper) and evaluation (dp_policy.py)
 
-    state: ResiP's input (residual_ppo.py: next_nobs, base_naction): obs on the base's training scale, so a few
-    mm of hole error is not lost against metre-scale coordinates, then the base action, which is already in the
-    DP's (unnormalized, [-1, 1]) action space
+    state: ResiP's input (residual_ppo.py: next_nobs, base_naction): normalized obs, then the base action, which
+    is already in the DP's (unnormalized, [-1, 1]) action space
     oracle: the same with the observed hole pose replaced by the true one, an upper bound on what knowing the
     error is worth; the base still sees the wrong pose
     history: the last HISTORY normalized obs (an episode's first obs repeated) in place of one, so the residual
     can see what its recent motion did, which a single obs of a constant error cannot show
     """
 
-    def __init__(self, base, mode, sim_env, obs_dim, act_dim):
+    def __init__(self, normalize, mode, sim_env, obs_dim, act_dim):
         assert mode in ("state", "oracle", "history"), mode
-        self.base, self.mode, self.sim_env = base, mode, sim_env
+        self.normalize, self.mode, self.sim_env = normalize, mode, sim_env
         self.dim = obs_dim * (HISTORY if mode == "history" else 1) + act_dim
         self.past = None
 
@@ -156,7 +178,7 @@ class ResidualInput:
         if self.mode == "oracle":
             obs = obs.clone()
             obs[:, HOLE_POSE] = self.sim_env.box_hole_pose.raw_pose
-        nobs = self.base.normalize(obs)
+        nobs = self.normalize(obs)
         if self.mode == "history":
             if self.past is None:
                 self.past = nobs[:, None].repeat(1, HISTORY, 1)

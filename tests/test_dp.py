@@ -18,7 +18,7 @@ import train  # noqa: E402
 from diffusion_policy.utils import HOLE_POSE, clean_traj_keys, perturb_hole_pose, sample_hole_noise  # noqa: E402
 from dp_policy import make_dp, make_residual  # noqa: E402
 from ppo import ResidualAgent  # noqa: E402
-from residual import DiffusionBase, ResidualWrapper  # noqa: E402
+from residual import OBS_CLIP, DiffusionBase, ObsNormalizer, ResidualWrapper  # noqa: E402
 
 OBS_DIM, ACT_DIM, NUM_ENVS = 43, 7, 3
 TINY = dict(obs_horizon=2, act_horizon=8, pred_horizon=16, diffusion_step_embed_dim=8, unet_dims=[8, 16], n_groups=2)
@@ -111,12 +111,18 @@ class FakeVectorEnv(gym.vector.VectorEnv):
         return self.obs, torch.zeros(len(self.obs)), done, done, {}
 
 
-def test_residual_sees_normalized_obs_and_base_action(tmp_path):
-    base = DiffusionBase(export(tmp_path, tiny_agent(tmp_path, True)), NUM_ENVS, "cpu")
-    obs = torch.randn(NUM_ENVS, OBS_DIM)
-    wrapped = ResidualWrapper(FakeVectorEnv(obs), base, 0.1)
+def obs_stats():
+    return dict(mean=torch.randn(OBS_DIM).tolist(), std=(torch.rand(OBS_DIM) * 0.5 + 0.01).tolist())
+
+
+def test_residual_sees_clipped_normalized_obs_and_base_sees_raw(tmp_path):
+    base = DiffusionBase(export(tmp_path, tiny_agent(tmp_path, False)), NUM_ENVS, "cpu")
+    obs, norm = torch.randn(NUM_ENVS, OBS_DIM), ObsNormalizer(obs_stats(), "cpu")
+    wrapped = ResidualWrapper(FakeVectorEnv(obs), base, 0.1, norm)
     residual_obs, _ = wrapped.reset()
-    assert torch.allclose(residual_obs, torch.cat([(obs - base.obs_mean) / base.obs_std, wrapped.base_action], -1))
+    z = (obs - norm.mean) / norm.std
+    assert z.abs().max() > OBS_CLIP  # the stats make some dims overflow, as joint velocities do
+    assert torch.allclose(residual_obs, torch.cat([z.clamp(-OBS_CLIP, OBS_CLIP), wrapped.base_action], -1))
     assert torch.equal(base.history[:, -1], obs)
 
 
@@ -125,17 +131,17 @@ def state_dict_obs(flat):
 
 
 def test_adapters_execute_what_residual_training_executes(tmp_path):
-    base_path = export(tmp_path, tiny_agent(tmp_path, True))
-    obs = torch.randn(NUM_ENVS, OBS_DIM)
+    base_path = export(tmp_path, tiny_agent(tmp_path, False))
+    obs, norm = torch.randn(NUM_ENVS, OBS_DIM), ObsNormalizer(obs_stats(), "cpu")
     env = SimpleNamespace(unwrapped=SimpleNamespace(device="cpu", single_action_space=ACTION_SPACE))
     residual = ResidualAgent(SimpleNamespace(
         single_observation_space=gym.spaces.Box(-np.inf, np.inf, (OBS_DIM + ACT_DIM,), np.float32),
         single_action_space=ACTION_SPACE))
     torch.nn.init.normal_(residual.actor_mean[-1].weight, std=1.0)  # big enough that some actions clamp
-    torch.save(dict(agent=residual.state_dict(), base_checkpoint=str(base_path)), tmp_path / "ppo.pt")
+    torch.save(dict(agent=residual.state_dict(), base_checkpoint=str(base_path), obs_norm=norm.stats), tmp_path / "ppo.pt")
 
     fake = FakeVectorEnv(obs)
-    wrapped = ResidualWrapper(fake, DiffusionBase(base_path, NUM_ENVS, "cpu"), 0.1)
+    wrapped = ResidualWrapper(fake, DiffusionBase(base_path, NUM_ENVS, "cpu"), 0.1, norm)
     torch.manual_seed(0)
     residual_obs, _ = wrapped.reset()
     base_action = wrapped.base_action
