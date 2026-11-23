@@ -1,3 +1,4 @@
+from pathlib import Path
 import os
 
 import gymnasium as gym
@@ -13,7 +14,8 @@ import noisy_env  # noqa: F401  registers PegInsertionSideNoisy-v1
 import start_states
 from start_pool import StartPoolWrapper
 
-STARTS = "data/interim_test.pt"
+# absolute: SAPIEN changes the working directory on macOS when it creates an env
+STARTS = str(Path(__file__).resolve().parents[1] / "data/interim_test.pt")
 
 
 def make_env():
@@ -98,7 +100,7 @@ def test_full_reset_does_not_rebuild_when_slots_cover_the_pool():
 
 def test_sut_generated_states_restore_on_the_noisy_env():
     # generate_start_states.py saves a list of records from PegInsertionSide-v1; skipped until fetched
-    path = "start_states/eval/states.pt"
+    path = str(Path(__file__).resolve().parents[1] / "start_states/eval/states.pt")
     if not os.path.exists(path):
         pytest.skip("start_states/eval/states.pt is missing")
     env = gym.make("PegInsertionSideNoisy-v1", obs_mode="state", control_mode="pd_ee_delta_pose",
