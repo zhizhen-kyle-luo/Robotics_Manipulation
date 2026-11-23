@@ -30,12 +30,12 @@ for seed in $SEEDS; do
   resume_args=""
   if [[ -n "${RESUME:-}" ]]; then resume_args="--resume $(printf %q "$RESUME")"; fi
   # no --num-demos: train.py loads every successful demo, one per seed
+  # no --norm-stats-path: raw obs as ManiSkill's baseline; z-scored joint velocities broke the DP (residual.py ObsNormalizer)
   cmd="CUDA_VISIBLE_DEVICES=$((i % NUM_GPUS)) $PYTHON train.py --env-id PegInsertionSide-v1 \
     --demo-path $DEMO_PATH \
     --control-mode pd_ee_delta_pose --sim-backend physx_cpu \
     --max_episode_steps 300 --total_iters 100000 \
     --num_eval_envs 8 --save_freq 5000 \
-    --norm-stats-path $DATA/norm_stats.json \
     --seed $seed --exp-name $exp \
     $resume_args $* 2>&1 | tee -a runs/logs/$exp.log"
   tmux new-session -d -s "$session" -c "$PWD" "$cmd; echo '[exited]'; exec bash"

@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 import pytest
 import torch
@@ -8,7 +9,8 @@ import evaluate  # first: sets up macOS Vulkan before any env is built
 import start_states
 from classical import ClassicalBase, ClassicalController
 
-STARTS = "data/interim_test.pt"
+# absolute: SAPIEN changes the working directory on macOS when it creates an env
+STARTS = str(Path(__file__).resolve().parents[1] / "data/interim_test.pt")
 
 
 @pytest.fixture(scope="module")

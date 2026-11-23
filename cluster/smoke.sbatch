@@ -22,7 +22,8 @@ python evaluate.py --policy classical --starts start_states/eval/states.pt --lim
 
 # 3 residual iterations, once a DP export exists: read SPS and look for PhysX overflow or lost-pair warnings
 if [ -f base_ckpts/dp_clean_s0.pt ]; then
-    python ppo.py --starts start_states/train/states.pt --total-timesteps 614400 --eval-freq 1 \
+    python ppo.py --starts start_states/train/states.pt --obs-norm-stats data/dp_training/norm_stats.json \
+        --total-timesteps 614400 --eval-freq 1 \
         --hole-offset-range 0 0.006 --hole-rot-range-deg 0 1 --no-capture-video --exp-name smoke_residual
 fi
 

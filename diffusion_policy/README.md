@@ -1,17 +1,20 @@
 # Diffusion Policy: PegInsertionSide-v1
 
-Diffusion Policy baseline from ManiSkill v3.0.1, trained on `pd_ee_delta_pose` state demos with observation
-normalization. Run every command from this directory (`diffusion_policy/`) with the repo venv
+Diffusion Policy baseline from ManiSkill v3.0.1, trained on `pd_ee_delta_pose` state demos with raw
+observations, as the baseline does. Run every command from this directory (`diffusion_policy/`) with the repo venv
 (`../.venv/bin/python`).
 
 Data used by default:
 - demos: `../data/dp_training/trajectory.state.pd_ee_delta_pose.physx_cpu.h5`
-- norm stats: `../data/dp_training/norm_stats.json`
+- norm stats: `../data/dp_training/norm_stats.json` (for the residual's input only, `ppo.py --obs-norm-stats`)
 - held-out grasped start states: `../start_states/eval/states.pt`
 
 ## 1. Norm stats
 
-Recompute after changing the demo file.
+The residual z-scores its observations with these and clips them (`residual.py` `ObsNormalizer`). The DP is
+not trained with them: joint velocities are near zero in the demos, so their z-scores reach the hundreds on a
+policy's own motion, and a normalized DP fell to about 5 percent success against about 60 raw. Recompute after
+changing the demo file.
 
 ```bash
 ../.venv/bin/python compute_norm.py \
@@ -68,7 +71,6 @@ RESUME=runs/dp_clean_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
   --control-mode pd_ee_delta_pose --sim-backend physx_cpu \
   --max_episode_steps 300 --total_iters 100000 \
   --num_eval_envs 8 --save_freq 5000 \
-  --norm-stats-path ../data/dp_training/norm_stats.json \
   --seed 0 --exp-name dp_clean_s0
 ```
 
@@ -80,7 +82,7 @@ RESUME=runs/dp_clean_s0/checkpoints/50000.pt SEEDS=0 ./launch_dp.sh
 | `--sim-backend` | `physx_cpu` | |
 | `--num-demos` | all | number of trajectories to load, from the successful one-per-seed demos |
 | `--hole-noise` | off | perturb the observed hole pose per demo (noise-augmented DP) |
-| `--norm-stats-path` | none | normalize observations with this `norm_stats.json`; without it, the original baseline (no normalization) |
+| `--norm-stats-path` | none | not used: z-scores observations inside the DP, which broke it (see section 1) |
 | `--resume` | none | continue from a checkpoint (`runs/<exp>/checkpoints/<tag>.pt`) |
 | `--seed` | `1` | |
 | `--exp-name` | auto | run folder name under `runs/` |
@@ -101,7 +103,7 @@ All options: `../.venv/bin/python train.py --help`
 
 ### Export for the residual and `evaluate.py`
 
-Run from the repo root. The export keeps the EMA weights and normalization stats and adds the config
+Run from the repo root. The export keeps the EMA weights and adds the config
 `residual.DiffusionBase` reads; pass any architecture flag the run changed.
 
 ```bash
@@ -110,7 +112,7 @@ for tag in clean noise; do for s in 0 1 2; do
   uv run python evaluate.py --policy dp_policy:make_dp --policy-kwargs "{\"checkpoint\": \"base_ckpts/dp_${tag}_s$s.pt\"}" \
     --starts start_states/eval/states.pt --num-envs 100 --out results/dp_${tag}_s$s.json
 done; done
-uv run python ppo.py --base-checkpoint base_ckpts/dp_clean_s0.pt ...   # residual on one of them
+uv run python ppo.py --base-checkpoint base_ckpts/dp_clean_s0.pt --obs-norm-stats data/dp_training/norm_stats.json ...   # residual on one of them
 uv run python evaluate.py --policy dp_policy:make_residual --policy-kwargs '{"checkpoint": "runs/<run>/final_ckpt.pt"}' \
   --starts start_states/eval/states.pt --num-envs 100 --out results/residual_<run>.json
 ```

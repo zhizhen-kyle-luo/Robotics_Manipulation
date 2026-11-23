@@ -12,8 +12,9 @@ uv run pytest tests
 ## Residual PPO
 
 ```bash
-uv run python ppo.py --base dp --starts start_states/train/states.pt   # clean residual (4), ResiP's settings (the Args defaults in ppo.py)
-uv run python ppo.py --base dp --starts start_states/train/states.pt \
+N=data/dp_training/norm_stats.json   # from diffusion_policy/compute_norm.py; the residual's obs are z-scored with it and clipped
+uv run python ppo.py --base dp --starts start_states/train/states.pt --obs-norm-stats $N   # clean residual (4), ResiP's settings (the Args defaults in ppo.py)
+uv run python ppo.py --base dp --starts start_states/train/states.pt --obs-norm-stats $N \
     --hole-offset-range 0 0.006 --hole-rot-range-deg 0 1                # noise-trained residual (4'): 0-6 mm, 0-1 deg
 # diagnostics, added to the noise-trained command: --residual-obs oracle (sees the true hole) or history (last 4 obs)
 uv run python ppo.py <original flags> --checkpoint runs/<run>/ckpt_<i>.pt --exp-name <run>  # resume: repeat every original flag
