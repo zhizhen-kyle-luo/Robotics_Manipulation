@@ -175,13 +175,16 @@ class SmallDemoDataset_DiffusionPolicy(Dataset): # Load everything into GPU memo
             pad_action = torch.cat((self.pad_action_arm, gripper_action[None]), dim=0)
             act_seq = torch.cat([act_seq, pad_action.repeat(end-L, 1)], dim=0)
             # making the robot (arm and gripper) stay still
-        if self.hole_noise is not None:
-            obs_seq = perturb_hole_pose(obs_seq, self.hole_noise[traj_idx])
         assert obs_seq.shape[0] == self.obs_horizon and act_seq.shape[0] == self.pred_horizon
         return {
             'observations': obs_seq,
             'actions': act_seq,
+            'traj_idx': traj_idx,
         }
+    
+    def add_hole_noise(self, obs_batch, traj_idx):
+        noise = self.hole_noise[torch.as_tensor(traj_idx).to(self.hole_noise.device)]
+        return perturb_hole_pose(obs_batch, noise[:, None])
 
     def __len__(self):
         return len(self.slices)
@@ -492,12 +495,15 @@ if __name__ == "__main__":
     pbar = tqdm(total=args.total_iters, initial=start_iter)
     last_tick = time.time()
     for iteration, data_batch in enumerate(train_dataloader, start=start_iter):
+        observations = data_batch["observations"]
+        if args.hole_noise:
+            observations = dataset.add_hole_noise(observations, data_batch["traj_idx"])
         timings["data_loading"] += time.time() - last_tick
 
         # forward and compute loss
         last_tick = time.time()
         total_loss = agent.compute_loss(
-            obs_seq=data_batch["observations"],  # obs_batch_dict['state'] is (B, L, obs_dim)
+            obs_seq=observations,  # obs_batch_dict['state'] is (B, L, obs_dim)
             action_seq=data_batch["actions"],  # (B, L, act_dim)
         )
         timings["forward"] += time.time() - last_tick

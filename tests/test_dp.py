@@ -154,3 +154,41 @@ def test_adapters_execute_what_residual_training_executes(tmp_path):
         torch.manual_seed(0)
         policy.reset()
         assert torch.allclose(policy.act(state_dict_obs(obs)), want, atol=1e-6)
+
+def test_batched_hole_noise_matches_per_sample(monkeypatch):
+    rng = np.random.default_rng(0)
+    lengths = [20, 23, 31]
+    obs, acts = [], []
+    for L in lengths:
+        o = rng.normal(size=(L + 1, OBS_DIM)).astype(np.float32)
+        q = rng.normal(size=4)
+        o[:, HOLE_POSE.start + 3:HOLE_POSE.stop] = (q / np.linalg.norm(q)).astype(np.float32)
+        obs.append(o)
+        acts.append(rng.uniform(-1, 1, size=(L, ACT_DIM)).astype(np.float32))
+    monkeypatch.setattr("diffusion_policy.utils.load_demo_dataset",
+                        lambda *a, **k: dict(observations=list(obs), actions=list(acts)))
+    monkeypatch.setattr(train, "args", SimpleNamespace(control_mode="pd_ee_delta_pose", obs_horizon=2,
+                                                       pred_horizon=16, hole_noise=True), raising=False)
+    torch.manual_seed(0)
+    dataset = train.SmallDemoDataset_DiffusionPolicy("demos.h5", "cpu", num_traj=None)
+    assert any(s < 0 for _, s, _ in dataset.slices)
+    assert any(e > lengths[t] for t, _, e in dataset.slices)
+
+    loader = torch.utils.data.DataLoader(dataset, batch_size=len(dataset), shuffle=True,
+                                         generator=torch.Generator().manual_seed(0))
+    rest = [i for i in range(OBS_DIM) if not HOLE_POSE.start <= i < HOLE_POSE.stop]
+    for _ in range(2):
+        batch = next(iter(loader))
+        out = dataset.add_hole_noise(batch["observations"], batch["traj_idx"])
+        for b in range(len(out)):
+            expected = perturb_hole_pose(batch["observations"][b], dataset.hole_noise[batch["traj_idx"][b]])
+            assert torch.allclose(out[b], expected, atol=1e-6)
+        assert torch.equal(out[..., rest], batch["observations"][..., rest])
+        assert not torch.allclose(out[..., HOLE_POSE], batch["observations"][..., HOLE_POSE])
+        for i, (t, s, _) in enumerate(dataset.slices):
+            item = dataset[i]
+            assert item["traj_idx"] == t
+            assert torch.equal(item["observations"][-1], torch.as_tensor(obs[t][s + 1]))
+        before = dataset.hole_noise.clone()
+        dataset.resample_hole_noise()
+        assert not torch.equal(before, dataset.hole_noise)
